@@ -26,7 +26,7 @@ import path from 'path';
 loadModulesDynamically(path.resolve(__dirname, 'cloud-functions'));
 
 Object.assign(exports, registry.exportGrouped({
-    memory: '1GiB',
+    memory: '4GiB',
     timeoutSeconds: 540,
 }));
 registry.title = 'url2text';
