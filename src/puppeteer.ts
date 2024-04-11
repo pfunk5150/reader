@@ -1,19 +1,33 @@
-import { AsyncService, Defer } from 'civkit';
-import { container, singleton } from 'tsyringe';
 import puppeteer, { Browser } from 'puppeteer';
-import { Logger } from '../shared/services/logger';
 import genericPool from 'generic-pool';
 import os from 'os';
 import fs from 'fs';
+import EventEmitter from 'events';
+
+interface Deferred<T> {
+    promise: Promise<T>;
+    resolve: (data?: T | Promise<T> | void) => void;
+    reject: (err?: any | void) => void;
+}
+function Defer<T = unknown>(): Deferred<T> {
+    const self: any = {};
+    self.promise = new Promise<T>((resolve, reject) => {
+        self.resolve = resolve;
+        self.reject = reject;
+    });
+    Object.freeze(self);
+
+    return self;
+}
 
 
 const READABILITY_JS = fs.readFileSync(require.resolve('@mozilla/readability/Readability.js'), 'utf-8');
 
-@singleton()
-export class PuppeteerControl extends AsyncService {
+export class PuppeteerControl extends EventEmitter {
+
+    status: 'init' | 'crippled' | 'ready' = 'init';
 
     browser!: Browser;
-    logger = this.globalLogger.child({ service: this.constructor.name });
 
     pagePool = genericPool.createPool({
         create: async () => {
@@ -27,17 +41,20 @@ export class PuppeteerControl extends AsyncService {
             return this.browser.connected && !page.isClosed();
         }
     }, {
-        max: Math.ceil(os.freemem() / 1024 * 1024 * 1024),
-        min: 0,
+        max: 1 + Math.floor(os.freemem() / 1024 * 1024 * 1024),
+        min: 1,
     });
 
-    constructor(protected globalLogger: Logger) {
+    constructor() {
         super(...arguments);
+        this.on('ready', () => this.status = 'ready');
+        this.on('crippled', () => this.status = 'crippled');
     }
 
-    override async init() {
-        await this.dependencyReady();
-
+    async init() {
+        if (this.status === 'ready') {
+            return;
+        }
         if (this.browser) {
             await this.browser.close();
         }
@@ -46,7 +63,6 @@ export class PuppeteerControl extends AsyncService {
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
         });
         this.browser.once('disconnected', () => {
-            this.logger.warn(`Browser disconnected`);
             this.emit('crippled');
         });
 
@@ -54,7 +70,7 @@ export class PuppeteerControl extends AsyncService {
     }
 
     async newPage() {
-        await this.serviceReady();
+        await this.init();
         const dedicatedContext = await this.browser.createBrowserContext();
 
         const page = await dedicatedContext.newPage();
@@ -144,6 +160,6 @@ export class PuppeteerControl extends AsyncService {
 
 }
 
-const puppeteerControl = container.resolve(PuppeteerControl);
+const puppeteerControl = new PuppeteerControl();
 
 export default puppeteerControl;

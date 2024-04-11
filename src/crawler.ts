@@ -1,7 +1,7 @@
 import { marshalErrorLike, RPCHost, RPCReflection } from 'civkit';
 import { singleton } from 'tsyringe';
 import { CloudHTTPv2, Logger, OutputServerEventStream, Param, RPCReflect } from '../shared';
-import { PuppeteerControl } from '../services/puppeteer';
+import { PuppeteerControl } from './puppeteer';
 import TurnDownService from 'turndown';
 
 
