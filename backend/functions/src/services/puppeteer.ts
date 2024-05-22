@@ -304,7 +304,7 @@ document.addEventListener('load', handlePageLoad);
 `);
 
         this.snMap.set(page, sn);
-        this.logger.warn(`Page ${sn} created.`);
+        this.logger.info(`Page ${sn} created.`);
         this.lastPageCratedAt = Date.now();
         this.livePages.add(page);
 

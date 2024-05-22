@@ -21,6 +21,7 @@ import { randomUUID } from 'crypto';
 import { JinaEmbeddingsAuthDTO } from '../shared/dto/jina-embeddings-auth';
 
 import { countGPTToken as estimateToken } from '../shared/utils/openai';
+import { CrawlerOptions } from '../dto/scrapping-options';
 
 const md5Hasher = new HashManager('md5', 'hex');
 
@@ -887,6 +888,23 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
                 x.return();
             }
         }
+    }
+
+    configure(opts: CrawlerOptions) {
+
+        this.threadLocal.set('withGeneratedAlt', opts.withGeneratedAlt);
+        this.threadLocal.set('withLinksSummary', opts.withLinksSummary);
+        this.threadLocal.set('withImagesSummary', opts.withImagesSummary);
+
+        const crawlOpts: ExtraScrappingOptions = {
+            proxyUrl: opts.proxyUrl,
+            cookies: opts.setCookies,
+            favorScreenshot: opts.respondWith === 'screenshot',
+            waitForSelector: opts.waitForSelector,
+            targetSelector: opts.targetSelector,
+        };
+
+        return crawlOpts;
     }
 
 }

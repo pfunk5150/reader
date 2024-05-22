@@ -1,38 +1,24 @@
 import {
     assignTransferProtocolMeta, marshalErrorLike,
-    RPCHost, RPCReflection,
-    AssertionFailureError,
-    objHashMd5B64Of,
+    RPCHost, RPCReflection, UploadedFile,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { AsyncContext, CloudHTTPv2, Ctx, InsufficientBalanceError, Logger, OutputServerEventStream, Param, RPCMethod, RPCReflect } from '../shared';
+import { AsyncContext, Ctx, InsufficientBalanceError, Logger, OutputServerEventStream, Param, PromptChunk, RPCMethod, RPCReflect } from '../shared';
 import { RateLimitControl } from '../shared/services/rate-limit';
 import _ from 'lodash';
-import { ScrappingOptions } from '../services/puppeteer';
 import { Request, Response } from 'express';
 import { JinaEmbeddingsAuthDTO } from '../shared/dto/jina-embeddings-auth';
-import { BraveSearchService } from '../services/brave-search';
-import { CrawlerHost, FormattedPage } from './crawler';
-import { CookieParam } from 'puppeteer';
+import { CrawlerHost } from './crawler';
 
-import { parseString as parseSetCookieString } from 'set-cookie-parser';
-import { WebSearchQueryParams } from '../shared/3rd-party/brave-search';
-import { SearchResult } from '../db/searched';
-import { WebSearchApiResponse, SearchResult as WebSearchResult } from '../shared/3rd-party/brave-types';
 import { SearcherHost } from './searcher';
+import { LLMModelOptions } from '../shared/dto/llm';
+import { readFile } from 'fs/promises';
+import { CrawlerOptions } from '../dto/scrapping-options';
 
 
 @singleton()
 export class InterrogatorHost extends RPCHost {
     logger = this.globalLogger.child({ service: this.constructor.name });
-
-    cacheRetentionMs = 1000 * 3600 * 24 * 7;
-    cacheValidMs = 1000 * 3600;
-    pageCacheToleranceMs = 1000 * 3600 * 24;
-
-    reasonableDelayMs = 10_000;
-
-    targetResultCount = 5;
 
     constructor(
         protected globalLogger: Logger,
@@ -136,12 +122,17 @@ export class InterrogatorHost extends RPCHost {
             res: Response,
         },
         auth: JinaEmbeddingsAuthDTO,
+        inputOptions: LLMModelOptions,
+        crawlerOptions: CrawlerOptions,
         @Param('url', {
             required: true,
             validate(url: URL) {
                 return url.protocol === 'http:' || url.protocol === 'https:';
             }
         }) url: URL,
+        @Param('model') model?: string,
+        @Param('prompt', { type: String }) prompt?: string,
+        @Param('expandImages') expandImages?: boolean,
     ) {
         const uid = await auth.solveUID();
         let chargeAmount = 0;
@@ -152,7 +143,7 @@ export class InterrogatorHost extends RPCHost {
                 throw new InsufficientBalanceError(`Account balance not enough to run this query, please recharge.`);
             }
 
-            const apiRoll = await this.rateLimitControl.simpleRPCUidBasedLimit(rpcReflect, uid, ['SEARCH'],
+            const apiRoll = await this.rateLimitControl.simpleRPCUidBasedLimit(rpcReflect, uid, ['INTERROGATE'],
                 [
                     // 40 requests per minute
                     new Date(Date.now() - 60 * 1000), 40
@@ -161,7 +152,7 @@ export class InterrogatorHost extends RPCHost {
 
             rpcReflect.finally(() => {
                 if (chargeAmount) {
-                    auth.reportUsage(chargeAmount, 'reader-search').catch((err) => {
+                    auth.reportUsage(chargeAmount, 'reader-interrogate').catch((err) => {
                         this.logger.warn(`Unable to report usage for ${uid}`, { err: marshalErrorLike(err) });
                     });
                     apiRoll.chargeAmount = chargeAmount;
@@ -169,7 +160,7 @@ export class InterrogatorHost extends RPCHost {
             });
         } else if (ctx.req.ip) {
             this.threadLocal.set('ip', ctx.req.ip);
-            const apiRoll = await this.rateLimitControl.simpleRpcIPBasedLimit(rpcReflect, ctx.req.ip, ['SEARCH'],
+            const apiRoll = await this.rateLimitControl.simpleRpcIPBasedLimit(rpcReflect, ctx.req.ip, ['INTERROGATE'],
                 [
                     // 5 requests per minute
                     new Date(Date.now() - 60 * 1000), 5
@@ -182,322 +173,87 @@ export class InterrogatorHost extends RPCHost {
             });
         }
 
-        const customMode = ctx.req.get('x-respond-with') || ctx.req.get('x-return-format') || 'default';
-        const withGeneratedAlt = Boolean(ctx.req.get('x-with-generated-alt'));
-        const withLinksSummary = Boolean(ctx.req.get('x-with-links-summary'));
-        const withImagesSummary = Boolean(ctx.req.get('x-with-images-summary'));
-        const noCache = Boolean(ctx.req.get('x-no-cache'));
-        let pageCacheTolerance = parseInt(ctx.req.get('x-cache-tolerance') || '') * 1000;
-        if (isNaN(pageCacheTolerance)) {
-            pageCacheTolerance = this.pageCacheToleranceMs;
-            if (noCache) {
-                pageCacheTolerance = 0;
+        const crawlerConf = this.crawler.configure(crawlerOptions);
+        this.threadLocal.set('expandImages', expandImages ?? false);
+
+        return assignTransferProtocolMeta(`${crawlerConf}`, { contentType: 'text/plain', envelope: null });
+    }
+
+
+    async expandMarkdown(input: string, files: { [k: string]: UploadedFile; } = {}) {
+        const result: PromptChunk[] = [];
+        const imageRegex = /!\[(.*?)\]\((.*?)\)/g;
+
+        let lastIndex = 0;
+        let match: RegExpExecArray | null;
+
+        while ((match = imageRegex.exec(input)) !== null) {
+            // Add the text before the image
+            if (match.index > lastIndex) {
+                result.push(input.substring(lastIndex, match.index));
             }
-        }
-        const cookies: CookieParam[] = [];
-        const setCookieHeaders = ctx.req.headers['x-set-cookie'];
-        if (Array.isArray(setCookieHeaders)) {
-            for (const setCookie of setCookieHeaders) {
-                cookies.push({
-                    ...parseSetCookieString(setCookie, { decodeValues: false }) as CookieParam,
-                });
-            }
-        } else if (setCookieHeaders) {
-            cookies.push({
-                ...parseSetCookieString(setCookieHeaders, { decodeValues: false }) as CookieParam,
-            });
-        }
-        this.threadLocal.set('withGeneratedAlt', withGeneratedAlt);
-        this.threadLocal.set('withLinksSummary', withLinksSummary);
-        this.threadLocal.set('withImagesSummary', withImagesSummary);
 
-        const crawlOpts: ScrappingOptions = {
-            proxyUrl: ctx.req.get('x-proxy-url'),
-            cookies,
-            favorScreenshot: customMode === 'screenshot'
-        };
+            // Extract the alt text and image URL
+            // const altText = match[1];
+            const imageUrl = match[2];
 
-        const searchQuery = noSlashPath;
-        const r = await this.cachedWebSearch({
-            q: searchQuery,
-            count: 10
-        }, noCache);
-
-        if (!r.web?.results.length) {
-            throw new AssertionFailureError(`No search results available for query ${searchQuery}`);
-        }
-
-        const it = this.fetchSearchResults(customMode, r.web?.results, crawlOpts, pageCacheTolerance);
-
-        if (!ctx.req.accepts('text/plain') && ctx.req.accepts('text/event-stream')) {
-            const sseStream = new OutputServerEventStream();
-            rpcReflect.return(sseStream);
-
+            // Validate and add the URL object
             try {
-                for await (const scrapped of it) {
-                    if (!scrapped) {
-                        continue;
+                const urlObject = new URL(imageUrl, 'file://');
+
+                if (urlObject.protocol === 'file:') {
+                    const origFileName = urlObject.pathname.substring(1);
+                    const fileNameDecoded = decodeURI(origFileName);
+                    const fileNameEncoded = encodeURI(origFileName);
+                    const file = files[origFileName] || files[fileNameDecoded] || files[fileNameEncoded];
+
+                    if (file) {
+                        const fpath = await file.filePath;
+                        const buff = await readFile(fpath);
+
+                        result.push(buff);
                     }
-
-                    chargeAmount = this.getChargeAmount(scrapped);
-                    sseStream.write({
-                        event: 'data',
-                        data: scrapped,
-                    });
+                } else {
+                    result.push(urlObject);
                 }
-            } catch (err: any) {
-                this.logger.error(`Failed to collect search result for query ${searchQuery}`,
-                    { err: marshalErrorLike(err) }
-                );
-                sseStream.write({
-                    event: 'error',
-                    data: marshalErrorLike(err),
-                });
+
+            } catch (error) {
+                // If the URL is invalid, add the raw image markdown instead
+                result.push(match[0]);
             }
 
-            sseStream.end();
+            // Add the image markdown
+            result.push(match[0]);
 
-            return sseStream;
+            // Update the lastIndex to the end of the current match
+            lastIndex = imageRegex.lastIndex;
         }
 
-        let lastScrapped: any[] | undefined;
-        let earlyReturn = false;
-        if (!ctx.req.accepts('text/plain') && (ctx.req.accepts('text/json') || ctx.req.accepts('application/json'))) {
-            const earlyReturnTimer = setTimeout(() => {
-                if (!lastScrapped) {
-                    return;
+        // Add any remaining text after the last image
+        if (lastIndex < input.length) {
+            result.push(input.substring(lastIndex));
+        }
+
+        // Merge consecutive string elements
+        const mergedResult: PromptChunk[] = [];
+        let tempString = "";
+
+        for (const item of result) {
+            if (typeof item === "string") {
+                tempString += item;
+            } else {
+                if (tempString) {
+                    mergedResult.push(tempString);
+                    tempString = "";
                 }
-                chargeAmount = this.getChargeAmount(lastScrapped);
-                rpcReflect.return(lastScrapped);
-                earlyReturn = true;
-            }, this.reasonableDelayMs);
-
-            for await (const scrapped of it) {
-                lastScrapped = scrapped;
-
-                if (!this.searchResultsQualified(scrapped)) {
-                    continue;
-                }
-                clearTimeout(earlyReturnTimer);
-                chargeAmount = this.getChargeAmount(scrapped);
-
-                return scrapped;
-            }
-
-            clearTimeout(earlyReturnTimer);
-
-            if (!lastScrapped) {
-                throw new AssertionFailureError(`No content available for query ${searchQuery}`);
-            }
-
-            if (!earlyReturn) {
-                chargeAmount = this.getChargeAmount(lastScrapped);
-            }
-
-            return lastScrapped;
-        }
-
-        const earlyReturnTimer = setTimeout(() => {
-            if (!lastScrapped) {
-                return;
-            }
-            chargeAmount = this.getChargeAmount(lastScrapped);
-            rpcReflect.return(assignTransferProtocolMeta(`${lastScrapped}`, { contentType: 'text/plain', envelope: null }));
-            earlyReturn = true;
-        }, this.reasonableDelayMs);
-
-        for await (const scrapped of it) {
-            lastScrapped = scrapped;
-
-            if (!this.searchResultsQualified(scrapped)) {
-                continue;
-            }
-
-            clearTimeout(earlyReturnTimer);
-            chargeAmount = this.getChargeAmount(scrapped);
-
-            return assignTransferProtocolMeta(`${scrapped}`, { contentType: 'text/plain', envelope: null });
-        }
-
-        clearTimeout(earlyReturnTimer);
-
-        if (!lastScrapped) {
-            throw new AssertionFailureError(`No content available for query ${searchQuery}`);
-        }
-
-        if (!earlyReturn) {
-            chargeAmount = this.getChargeAmount(lastScrapped);
-        }
-
-
-        return assignTransferProtocolMeta(`${lastScrapped}`, { contentType: 'text/plain', envelope: null });
-    }
-
-    async *fetchSearchResults(
-        mode: string | 'markdown' | 'html' | 'text' | 'screenshot',
-        searchResults?: WebSearchResult[],
-        options?: ScrappingOptions,
-        pageCacheTolerance?: number
-    ) {
-        if (!searchResults) {
-            return;
-        }
-        const urls = searchResults.map((x) => new URL(x.url));
-        for await (const scrapped of this.crawler.scrapMany(urls, options, pageCacheTolerance)) {
-            const mapped = scrapped.map((x, i) => {
-                const upstreamSearchResult = searchResults[i];
-                if (!x || (!x.parsed && mode !== 'markdown')) {
-                    return {
-                        url: upstreamSearchResult.url,
-                        title: upstreamSearchResult.title,
-                        description: upstreamSearchResult.description,
-                    };
-                }
-                return this.crawler.formatSnapshot(mode, x, urls[i]);
-            });
-
-            const resultArray = await Promise.all(mapped) as FormattedPage[];
-
-            yield this.reOrganizeSearchResults(resultArray);
-        }
-    }
-
-    reOrganizeSearchResults(searchResults: FormattedPage[]) {
-        const [qualifiedPages, unqualifiedPages] = _.partition(searchResults, (x) => this.pageQualified(x));
-        const acceptSet = new Set(qualifiedPages);
-
-        const n = this.targetResultCount - qualifiedPages.length;
-        for (const x of unqualifiedPages.slice(0, n >= 0 ? n : 0)) {
-            acceptSet.add(x);
-        }
-
-        const filtered = searchResults.filter((x) => acceptSet.has(x)).slice(0, this.targetResultCount);
-        filtered.toString = searchResults.toString;
-
-        const resultArray = filtered.map((x, i) => {
-
-            return {
-                ...x,
-                toString(this: any) {
-                    if (this.description) {
-                        if (this.title) {
-                            return `[${i + 1}] Title: ${this.title}
-[${i + 1}] URL Source: ${this.url}
-[${i + 1}] Description: ${this.description}
-`;
-                        }
-
-                        return `[${i + 1}] No content available for ${this.url}`;
-                    }
-
-                    const mixins = [];
-                    if (this.publishedTime) {
-                        mixins.push(`[${i + 1}] Published Time: ${this.publishedTime}`);
-                    }
-
-                    const suffixMixins = [];
-                    if (this.images) {
-                        const imageSummaryChunks = [`[${i + 1}] Images:`];
-                        for (const [k, v] of Object.entries(this.images)) {
-                            imageSummaryChunks.push(`- ![${k}](${v})`);
-                        }
-                        if (imageSummaryChunks.length === 1) {
-                            imageSummaryChunks.push('This page does not seem to contain any images.');
-                        }
-                        suffixMixins.push(imageSummaryChunks.join('\n'));
-                    }
-                    if (this.links) {
-                        const linkSummaryChunks = [`[${i + 1}] Links/Buttons:`];
-                        for (const [k, v] of Object.entries(this.links)) {
-                            linkSummaryChunks.push(`- [${k}](${v})`);
-                        }
-                        if (linkSummaryChunks.length === 1) {
-                            linkSummaryChunks.push('This page does not seem to contain any buttons/links.');
-                        }
-                        suffixMixins.push(linkSummaryChunks.join('\n'));
-                    }
-
-                    return `[${i + 1}] Title: ${this.title}
-[${i + 1}] URL Source: ${this.url}${mixins.length ? `\n${mixins.join('\n')}` : ''}
-[${i + 1}] Markdown Content:
-${this.content}
-${suffixMixins.length ? `\n${suffixMixins.join('\n')}\n` : ''}`;
-                }
-            };
-        });
-
-        resultArray.toString = function () {
-            return this.map((x, i) => x ? x.toString() : `[${i + 1}] No content available for ${this[i].url}`).join('\n\n').trimEnd() + '\n';
-        };
-
-        return resultArray;
-    }
-
-    getChargeAmount(formatted: FormattedPage[]) {
-        return _.sum(
-            formatted.map((x) => this.crawler.getChargeAmount(x) || 0)
-        );
-    }
-
-    pageQualified(formattedPage: FormattedPage) {
-        return formattedPage.title &&
-            formattedPage.content ||
-            formattedPage.screenshotUrl ||
-            formattedPage.text ||
-            formattedPage.html;
-    }
-
-    searchResultsQualified(results: FormattedPage[]) {
-        return _.every(results, (x) => this.pageQualified(x)) && results.length >= this.targetResultCount;
-    }
-
-    async cachedWebSearch(query: WebSearchQueryParams, noCache: boolean = false) {
-        const queryDigest = objHashMd5B64Of(query);
-        let cache;
-        if (!noCache) {
-            cache = (await SearchResult.fromFirestoreQuery(
-                SearchResult.COLLECTION.where('queryDigest', '==', queryDigest)
-                    .orderBy('createdAt', 'desc')
-                    .limit(1)
-            ))[0];
-            if (cache) {
-                const age = Date.now() - cache.createdAt.valueOf();
-                const stale = cache.createdAt.valueOf() < (Date.now() - this.cacheValidMs);
-                this.logger.info(`${stale ? 'Stale cache exists' : 'Cache hit'} for search query "${query.q}", normalized digest: ${queryDigest}, ${age}ms old`, {
-                    query, digest: queryDigest, age, stale
-                });
-
-                if (!stale) {
-                    return cache.response as WebSearchApiResponse;
-                }
+                mergedResult.push(item);
             }
         }
 
-        try {
-            const r = await this.braveSearchService.webSearch(query);
-
-            const nowDate = new Date();
-            const record = SearchResult.from({
-                query,
-                queryDigest,
-                response: r,
-                createdAt: nowDate,
-                expireAt: new Date(nowDate.valueOf() + this.cacheRetentionMs)
-            });
-            SearchResult.save(record.degradeForFireStore()).catch((err) => {
-                this.logger.warn(`Failed to cache search result`, { err });
-            });
-
-            return r;
-        } catch (err: any) {
-            if (cache) {
-                this.logger.warn(`Failed to fetch search result, but a stale cache is available. falling back to stale cache`, { err: marshalErrorLike(err) });
-
-                return cache.response as WebSearchApiResponse;
-            }
-
-            throw err;
+        if (tempString) {
+            mergedResult.push(tempString);
         }
 
+        return mergedResult;
     }
 }
