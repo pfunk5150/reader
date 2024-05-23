@@ -515,7 +515,8 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
             req: Request,
             res: Response,
         },
-        auth: JinaEmbeddingsAuthDTO
+        auth: JinaEmbeddingsAuthDTO,
+        crawlerOptions: CrawlerOptions,
     ) {
         const uid = await auth.solveUID();
         let chargeAmount = 0;
@@ -584,58 +585,19 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
             });
         }
 
-        const customMode = ctx.req.get('x-respond-with') || ctx.req.get('x-return-format') || 'default';
-        const withGeneratedAlt = Boolean(ctx.req.get('x-with-generated-alt'));
-        const withLinksSummary = Boolean(ctx.req.get('x-with-links-summary'));
-        const withImagesSummary = Boolean(ctx.req.get('x-with-images-summary'));
-        const noCache = Boolean(ctx.req.get('x-no-cache'));
-        let cacheTolerance = parseInt(ctx.req.get('x-cache-tolerance') || '') * 1000;
-        if (isNaN(cacheTolerance)) {
-            cacheTolerance = this.cacheValidMs;
-            if (noCache) {
-                cacheTolerance = 0;
-            }
-        }
-        const targetSelector = ctx.req.get('x-target-selector') || undefined;
-        const waitForSelector = ctx.req.get('x-wait-for-selector') || targetSelector;
-        const cookies: CookieParam[] = [];
-        const setCookieHeaders = ctx.req.headers['x-set-cookie'];
-        if (Array.isArray(setCookieHeaders)) {
-            for (const setCookie of setCookieHeaders) {
-                cookies.push({
-                    ...parseSetCookieString(setCookie, { decodeValues: false }) as CookieParam,
-                    domain: urlToCrawl.hostname,
-                });
-            }
-        } else if (setCookieHeaders) {
-            cookies.push({
-                ...parseSetCookieString(setCookieHeaders, { decodeValues: false }) as CookieParam,
-                domain: urlToCrawl.hostname,
-            });
-        }
-        this.threadLocal.set('withGeneratedAlt', withGeneratedAlt);
-        this.threadLocal.set('withLinksSummary', withLinksSummary);
-        this.threadLocal.set('withImagesSummary', withImagesSummary);
-
-        const crawlOpts: ExtraScrappingOptions = {
-            proxyUrl: ctx.req.get('x-proxy-url'),
-            cookies,
-            favorScreenshot: customMode === 'screenshot',
-            waitForSelector,
-            targetSelector,
-        };
+        const crawlOpts = this.configure(crawlerOptions);
 
         if (!ctx.req.accepts('text/plain') && ctx.req.accepts('text/event-stream')) {
             const sseStream = new OutputServerEventStream();
             rpcReflect.return(sseStream);
 
             try {
-                for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, cacheTolerance)) {
+                for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, crawlerOptions.cacheTolerance)) {
                     if (!scrapped) {
                         continue;
                     }
 
-                    const formatted = await this.formatSnapshot(customMode, scrapped, urlToCrawl);
+                    const formatted = await this.formatSnapshot(crawlerOptions.respondWith, scrapped, urlToCrawl);
                     chargeAmount = this.getChargeAmount(formatted);
                     sseStream.write({
                         event: 'data',
@@ -657,13 +619,13 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
 
         let lastScrapped;
         if (!ctx.req.accepts('text/plain') && (ctx.req.accepts('text/json') || ctx.req.accepts('application/json'))) {
-            for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, cacheTolerance)) {
+            for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, crawlerOptions.cacheTolerance)) {
                 lastScrapped = scrapped;
-                if (waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
+                if (crawlerOptions.waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
                     continue;
                 }
 
-                const formatted = await this.formatSnapshot(customMode, scrapped, urlToCrawl);
+                const formatted = await this.formatSnapshot(crawlerOptions.respondWith, scrapped, urlToCrawl);
                 chargeAmount = this.getChargeAmount(formatted);
 
                 return formatted;
@@ -673,21 +635,21 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
                 throw new AssertionFailureError(`No content available for URL ${urlToCrawl}`);
             }
 
-            const formatted = await this.formatSnapshot(customMode, lastScrapped, urlToCrawl);
+            const formatted = await this.formatSnapshot(crawlerOptions.respondWith, lastScrapped, urlToCrawl);
             chargeAmount = this.getChargeAmount(formatted);
 
             return formatted;
         }
 
-        for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, cacheTolerance)) {
+        for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, crawlerOptions.cacheTolerance)) {
             lastScrapped = scrapped;
-            if (waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
+            if (crawlerOptions.waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
                 continue;
             }
 
-            const formatted = await this.formatSnapshot(customMode, scrapped, urlToCrawl);
+            const formatted = await this.formatSnapshot(crawlerOptions.respondWith, scrapped, urlToCrawl);
             chargeAmount = this.getChargeAmount(formatted);
-            if (customMode === 'screenshot' && Reflect.get(formatted, 'screenshotUrl')) {
+            if (crawlerOptions.respondWith === 'screenshot' && Reflect.get(formatted, 'screenshotUrl')) {
 
                 return assignTransferProtocolMeta(`${formatted}`,
                     { code: 302, envelope: null, headers: { Location: Reflect.get(formatted, 'screenshotUrl') } }
@@ -701,9 +663,9 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
             throw new AssertionFailureError(`No content available for URL ${urlToCrawl}`);
         }
 
-        const formatted = await this.formatSnapshot(customMode, lastScrapped, urlToCrawl);
+        const formatted = await this.formatSnapshot(crawlerOptions.respondWith, lastScrapped, urlToCrawl);
         chargeAmount = this.getChargeAmount(formatted);
-        if (customMode === 'screenshot' && Reflect.get(formatted, 'screenshotUrl')) {
+        if (crawlerOptions.respondWith === 'screenshot' && Reflect.get(formatted, 'screenshotUrl')) {
 
             return assignTransferProtocolMeta(`${formatted}`,
                 { code: 302, envelope: null, headers: { Location: Reflect.get(formatted, 'screenshotUrl') } }
