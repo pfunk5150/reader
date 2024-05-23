@@ -3,8 +3,8 @@ import {
     RPCHost, RPCReflection, UploadedFile,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { AsyncContext, Ctx, InsufficientBalanceError, Logger, OutputServerEventStream, Param, PromptChunk, RPCMethod, RPCReflect } from '../shared';
-import { RateLimitControl } from '../shared/services/rate-limit';
+import { AsyncContext, countGPTToken, Ctx, InsufficientBalanceError, LLMManager, Logger, OutputServerEventStream, Param, PromptChunk, RPCMethod, RPCReflect } from '../shared';
+import { RateLimitControl, RateLimitDesc } from '../shared/services/rate-limit';
 import _ from 'lodash';
 import { Request, Response } from 'express';
 import { JinaEmbeddingsAuthDTO } from '../shared/dto/jina-embeddings-auth';
@@ -14,6 +14,7 @@ import { SearcherHost } from './searcher';
 import { LLMModelOptions } from '../shared/dto/llm';
 import { readFile } from 'fs/promises';
 import { CrawlerOptions } from '../dto/scrapping-options';
+import { Readable } from 'stream';
 
 
 @singleton()
@@ -27,6 +28,8 @@ export class InterrogatorHost extends RPCHost {
 
         protected crawler: CrawlerHost,
         protected searcher: SearcherHost,
+
+        protected llmManager: LLMManager,
     ) {
         super(...arguments);
     }
@@ -130,8 +133,14 @@ export class InterrogatorHost extends RPCHost {
                 return url.protocol === 'http:' || url.protocol === 'https:';
             }
         }) url: URL,
-        @Param('model') model?: string,
-        @Param('prompt', { type: String }) prompt?: string,
+        @Param('model', { default: 'gpt-4o' }) model: string,
+        @Param('question', {
+            type: String,
+            required: true,
+            validate(txt: string) {
+                return txt.length > 0 && countGPTToken(txt) <= 2048;
+            }
+        }) prompt: string,
         @Param('expandImages') expandImages?: boolean,
     ) {
         const uid = await auth.solveUID();
@@ -143,40 +152,62 @@ export class InterrogatorHost extends RPCHost {
                 throw new InsufficientBalanceError(`Account balance not enough to run this query, please recharge.`);
             }
 
-            const apiRoll = await this.rateLimitControl.simpleRPCUidBasedLimit(rpcReflect, uid, ['INTERROGATE'],
-                [
-                    // 40 requests per minute
-                    new Date(Date.now() - 60 * 1000), 40
-                ]
+            const rateLimitPolicy = auth.getRateLimits(rpcReflect.name.toUpperCase()) || [RateLimitDesc.from({
+                occurrence: 40,
+                periodSeconds: 60
+            })];
+
+            const apiRoll = await this.rateLimitControl.simpleRPCUidBasedLimit(
+                rpcReflect, uid, [rpcReflect.name.toUpperCase()],
+                ...rateLimitPolicy
             );
 
             rpcReflect.finally(() => {
                 if (chargeAmount) {
-                    auth.reportUsage(chargeAmount, 'reader-interrogate').catch((err) => {
+                    auth.reportUsage(chargeAmount, `reader-${rpcReflect.name}`).catch((err) => {
                         this.logger.warn(`Unable to report usage for ${uid}`, { err: marshalErrorLike(err) });
                     });
                     apiRoll.chargeAmount = chargeAmount;
                 }
             });
         } else if (ctx.req.ip) {
-            this.threadLocal.set('ip', ctx.req.ip);
-            const apiRoll = await this.rateLimitControl.simpleRpcIPBasedLimit(rpcReflect, ctx.req.ip, ['INTERROGATE'],
+            const apiRoll = await this.rateLimitControl.simpleRpcIPBasedLimit(rpcReflect, ctx.req.ip, [rpcReflect.name.toUpperCase()],
                 [
                     // 5 requests per minute
                     new Date(Date.now() - 60 * 1000), 5
                 ]
             );
+
             rpcReflect.finally(() => {
                 if (chargeAmount) {
-                    apiRoll.chargeAmount = chargeAmount;
+                    apiRoll._ref?.set({
+                        chargeAmount,
+                    }, { merge: true }).catch((err) => this.logger.warn(`Failed to log charge amount in apiRoll`, { err }));
                 }
             });
         }
 
+        const mdl = this.llmManager.assertModel(model);
         const crawlerConf = this.crawler.configure(crawlerOptions);
         this.threadLocal.set('expandImages', expandImages ?? false);
+        const page = await this.crawler.simpleCrawl(crawlerOptions.respondWith, url, crawlerConf);
 
-        return assignTransferProtocolMeta(`${crawlerConf}`, { contentType: 'text/plain', envelope: null });
+        const content = page.toString();
+        const promptChunks = expandImages ? await this.expandMarkdown(content) : [content];
+        promptChunks.unshift('===== Start Of Webpage Content =====\n')
+        promptChunks.push('===== End Of Webpage Content =====\n\n')
+        promptChunks.push(`${prompt}`);
+
+        const r = await mdl.exec(promptChunks, inputOptions);
+
+        if (Readable.isReadable(r as any)) {
+            const outputStream = new OutputServerEventStream();
+            (r as any as Readable).pipe(outputStream);
+
+            return outputStream;
+        }
+
+        return assignTransferProtocolMeta(r.trim() + '\n', { contentType: 'text/plain', envelope: null });
     }
 
 

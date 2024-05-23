@@ -13,8 +13,6 @@ import { Request, Response } from 'express';
 import normalizeUrl from "@esm2cjs/normalize-url";
 import { AltTextService } from '../services/alt-text';
 import TurndownService from 'turndown';
-import { parseString as parseSetCookieString } from 'set-cookie-parser';
-import type { CookieParam } from 'puppeteer';
 import { Crawled } from '../db/crawled';
 import { cleanAttribute } from '../utils/misc';
 import { randomUUID } from 'crypto';
@@ -893,6 +891,40 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
         };
 
         return crawlOpts;
+    }
+
+    async simpleCrawl(mode: string, url: URL, opts?: ExtraScrappingOptions) {
+        const it = this.cachedScrap(url, { ...opts, minIntervalMs: 500 });
+
+        let lastSnapshot;
+        let goodEnough = false;
+        try {
+            for await (const x of it) {
+                lastSnapshot = x;
+
+                if (goodEnough) {
+                    break;
+                }
+
+                if (lastSnapshot?.parsed?.content) {
+                    // After it's good enough, wait for next snapshot;
+                    goodEnough = true;
+                }
+            }
+
+        } catch (err) {
+            if (lastSnapshot) {
+                return this.formatSnapshot(mode, lastSnapshot, url);
+            }
+
+            throw err;
+        }
+
+        if (!lastSnapshot) {
+            throw new AssertionFailureError(`No content available`);
+        }
+
+        return this.formatSnapshot(mode, lastSnapshot, url);
     }
 
 }
