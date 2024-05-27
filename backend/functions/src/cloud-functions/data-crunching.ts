@@ -1,15 +1,17 @@
 import {
+    Defer,
     PromiseThrottle,
     RPCHost,
     RPCReflection,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { CloudHTTPv2, CloudScheduleV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, RPCReflect } from '../shared';
+import { CloudHTTPv2, CloudScheduleV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, RPCReflect, TempFileManager } from '../shared';
 import _ from 'lodash';
-import { CrawlerHost, FormattedPage } from './crawler';
+import { CrawlerHost } from './crawler';
 
 import { Crawled } from '../db/crawled';
 import dayjs from 'dayjs';
+import { createReadStream, createWriteStream } from 'fs';
 dayjs.extend(require('dayjs/plugin/utc'));
 
 @singleton()
@@ -18,14 +20,14 @@ export class DataCrunchingHost extends RPCHost {
 
     pageCacheCrunchingPrefix = 'crunched-pages';
     pageCacheCrunchingBatchSize = 10000;
-    pageCacheCrunchingTMinus = 6 * 24 * 60 * 60 * 1000;
+    pageCacheCrunchingTMinus = 31 * 24 * 60 * 60 * 1000;
     rev = 2;
 
     constructor(
         protected globalLogger: Logger,
 
         protected crawler: CrawlerHost,
-
+        protected tempFileManager: TempFileManager,
         protected firebaseObjectStorage: FirebaseStorageBucketControl,
     ) {
         super(..._.without(arguments, crawler));
@@ -41,7 +43,7 @@ export class DataCrunchingHost extends RPCHost {
         name: 'crunchPageCacheEveryday',
         runtime: {
             cpu: 4,
-            memory: '16GiB',
+            memory: '8GiB',
             timeoutSeconds: 1800,
             timeZone: 'UTC',
             retryCount: 3,
@@ -52,7 +54,7 @@ export class DataCrunchingHost extends RPCHost {
     @CloudHTTPv2({
         runtime: {
             cpu: 4,
-            memory: '16GiB',
+            memory: '8GiB',
             timeoutSeconds: 3600,
             concurrency: 1,
             maxInstances: 1,
@@ -72,8 +74,8 @@ export class DataCrunchingHost extends RPCHost {
         for await (const { fileName, records } of this.iterPageCacheCrunching()) {
             this.logger.info(`Crunching ${fileName}...`);
             sse.write({ data: `Crunching ${fileName}...` });
-            const content = await this.crunchCacheRecords(records);
-            await this.firebaseObjectStorage.saveFile(fileName, Buffer.from(content), {
+            const fileOnDrive = await this.crunchCacheRecords(records);
+            await this.firebaseObjectStorage.bucket.file(fileName).save(createReadStream(fileOnDrive.path), {
                 contentType: 'application/jsonl',
             });
         }
@@ -122,41 +124,56 @@ export class DataCrunchingHost extends RPCHost {
 
     async crunchCacheRecords(records: Crawled[]) {
         const throttle = new PromiseThrottle(100);
-
-        const formatted: FormattedPage[] = [];
+        const localFileName = this.tempFileManager.alloc();
+        const fileWriteStream = createWriteStream(localFileName, { encoding: 'utf-8' });
+        let nextDrainDeferred = Defer();
+        nextDrainDeferred.resolve();
 
         for (const record of records) {
             await throttle.acquire();
-            this.firebaseObjectStorage.downloadFile(`snapshots/${record._id}`).then(async (r) => {
-                try {
-                    const snapshot = JSON.parse(r.toString('utf-8'));
+            this.firebaseObjectStorage.downloadFile(`snapshots/${record._id}`)
+                .then(async (snapshotTxt) => {
+                    try {
+                        const snapshot = JSON.parse(snapshotTxt.toString('utf-8'));
 
-                    const withReadability = await this.crawler.formatSnapshot('default', snapshot);
-                    withReadability.html = snapshot.html;
-                    if (withReadability.content) {
-                        formatted.push(withReadability);
-                        return;
+                        let formatted = await this.crawler.formatSnapshot('default', snapshot);
+                        if (!formatted.content) {
+                            formatted = await this.crawler.formatSnapshot('markdown', snapshot);
+                        }
+
+                        await nextDrainDeferred.promise;
+                        const wr = fileWriteStream.write(
+                            JSON.stringify({
+                                url: snapshot.href,
+                                html: snapshot.html || '',
+                                content: formatted.content || '',
+                            }) + '\n'
+                        );
+                        if (wr === false) {
+                            nextDrainDeferred = Defer();
+                            fileWriteStream.once('drain', () => {
+                                nextDrainDeferred.resolve();
+                            });
+                        }
+                    } catch (err) {
+                        this.logger.warn(`Failed to parse snapshot for ${record._id}`, { err });
                     }
-                    const withoutReadability = await this.crawler.formatSnapshot('markdown', snapshot);
-                    withoutReadability.html = snapshot.html;
-
-                    formatted.push(withoutReadability);
-                } catch (err) {
-                    this.logger.warn(`Failed to parse snapshot for ${record._id}`, { err });
-                }
-            }).finally(() => {
-                throttle.release();
-            });
+                })
+                .finally(() => {
+                    throttle.release();
+                });
         }
 
         await throttle.nextDrain();
 
-        return formatted.map((x) => {
-            return JSON.stringify({
-                url: x.url,
-                html: x.html || '',
-                content: x.content || '',
-            });
-        }).join('\n');
+        fileWriteStream.end();
+
+        const ro = {
+            path: localFileName
+        };
+
+        this.tempFileManager.bindPathTo(ro, localFileName);
+
+        return ro;
     }
 }
