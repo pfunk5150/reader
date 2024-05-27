@@ -132,11 +132,13 @@ export class DataCrunchingHost extends RPCHost {
                     const snapshot = JSON.parse(r.toString('utf-8'));
 
                     const withReadability = await this.crawler.formatSnapshot('default', snapshot);
+                    withReadability.html = snapshot.html;
                     if (withReadability.content) {
                         formatted.push(withReadability);
                         return;
                     }
                     const withoutReadability = await this.crawler.formatSnapshot('markdown', snapshot);
+                    withoutReadability.html = snapshot.html;
 
                     formatted.push(withoutReadability);
                 } catch (err) {
