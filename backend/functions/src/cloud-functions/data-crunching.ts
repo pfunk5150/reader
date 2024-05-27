@@ -22,7 +22,7 @@ export class DataCrunchingHost extends RPCHost {
     pageCacheCrunchingPrefix = 'crunched-pages';
     pageCacheCrunchingBatchSize = 1000;
     pageCacheCrunchingTMinus = 6 * 24 * 60 * 60 * 1000;
-    rev = 4;
+    rev = 5;
 
     constructor(
         protected globalLogger: Logger,
