@@ -12,6 +12,7 @@ import { CrawlerHost } from './crawler';
 import { Crawled } from '../db/crawled';
 import dayjs from 'dayjs';
 import { createReadStream, createWriteStream } from 'fs';
+import { createGzip } from 'zlib';
 dayjs.extend(require('dayjs/plugin/utc'));
 
 @singleton()
@@ -76,7 +77,7 @@ export class DataCrunchingHost extends RPCHost {
             sse.write({ data: `Crunching ${fileName}...` });
             const fileOnDrive = await this.crunchCacheRecords(records);
             await this.firebaseObjectStorage.bucket.file(fileName).save(createReadStream(fileOnDrive.path), {
-                contentType: 'application/jsonl',
+                contentType: 'application/jsonl+gzip',
             });
         }
 
@@ -94,7 +95,7 @@ export class DataCrunchingHost extends RPCHost {
         let counter = 0;
 
         while (theDay.isBefore(startOfToday)) {
-            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter}.jsonl`;
+            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter}.jsonl.gz`;
             const offset = counter;
             counter += this.pageCacheCrunchingBatchSize;
             const fileExists = (await this.firebaseObjectStorage.bucket.file(fileName).exists())[0];
@@ -126,6 +127,8 @@ export class DataCrunchingHost extends RPCHost {
         const throttle = new PromiseThrottle(30);
         const localFileName = this.tempFileManager.alloc();
         const fileWriteStream = createWriteStream(localFileName, { encoding: 'utf-8', highWaterMark: 64 * 1024 * 1024 });
+        const gzStream = createGzip();
+        gzStream.pipe(fileWriteStream);
         let nextDrainDeferred = Defer();
         nextDrainDeferred.resolve();
 
@@ -142,7 +145,7 @@ export class DataCrunchingHost extends RPCHost {
                         }
 
                         await nextDrainDeferred.promise;
-                        const wr = fileWriteStream.write(
+                        const wr = gzStream.write(
                             JSON.stringify({
                                 url: snapshot.href,
                                 title: snapshot.title || '',
@@ -153,7 +156,7 @@ export class DataCrunchingHost extends RPCHost {
                         );
                         if (wr === false) {
                             nextDrainDeferred = Defer();
-                            fileWriteStream.once('drain', () => {
+                            gzStream.once('drain', () => {
                                 nextDrainDeferred.resolve();
                             });
                         }
