@@ -121,7 +121,7 @@ export class DataCrunchingHost extends RPCHost {
     }
 
     async crunchCacheRecords(records: Crawled[]) {
-        const throttle = new PromiseThrottle(10);
+        const throttle = new PromiseThrottle(100);
 
         const formatted: FormattedPage[] = [];
 
