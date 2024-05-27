@@ -4,7 +4,7 @@ import {
     RPCReflection,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { CloudScheduleV2, CloudTaskV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, RPCReflect } from '../shared';
+import { CloudHTTPv2, CloudScheduleV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, RPCReflect } from '../shared';
 import _ from 'lodash';
 import { CrawlerHost, FormattedPage } from './crawler';
 
@@ -49,18 +49,11 @@ export class DataCrunchingHost extends RPCHost {
         },
         tags: ['DataCrunching'],
     })
-    @CloudTaskV2({
+    @CloudHTTPv2({
         runtime: {
             cpu: 4,
             memory: '16GiB',
             timeoutSeconds: 3600,
-            retryConfig: {
-                maxAttempts: 3,
-                minBackoffSeconds: 60,
-            },
-            rateLimits: {
-                maxConcurrentDispatches: 1,
-            },
             concurrency: 1,
             maxInstances: 1,
         },
