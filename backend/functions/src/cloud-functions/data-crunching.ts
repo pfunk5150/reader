@@ -19,9 +19,9 @@ export class DataCrunchingHost extends RPCHost {
     logger = this.globalLogger.child({ service: this.constructor.name });
 
     pageCacheCrunchingPrefix = 'crunched-pages';
-    pageCacheCrunchingBatchSize = 10000;
-    pageCacheCrunchingTMinus = 31 * 24 * 60 * 60 * 1000;
-    rev = 2;
+    pageCacheCrunchingBatchSize = 1000;
+    pageCacheCrunchingTMinus = 6 * 24 * 60 * 60 * 1000;
+    rev = 3;
 
     constructor(
         protected globalLogger: Logger,
@@ -94,7 +94,7 @@ export class DataCrunchingHost extends RPCHost {
         let counter = 0;
 
         while (theDay.isBefore(startOfToday)) {
-            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter ? counter : '00000'}.jsonl`;
+            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter}.jsonl`;
             const offset = counter;
             counter += this.pageCacheCrunchingBatchSize;
             const fileExists = (await this.firebaseObjectStorage.bucket.file(fileName).exists())[0];
@@ -145,7 +145,9 @@ export class DataCrunchingHost extends RPCHost {
                         const wr = fileWriteStream.write(
                             JSON.stringify({
                                 url: snapshot.href,
+                                title: snapshot.title || '',
                                 html: snapshot.html || '',
+                                text: snapshot.text || '',
                                 content: formatted.content || '',
                             }) + '\n'
                         );
