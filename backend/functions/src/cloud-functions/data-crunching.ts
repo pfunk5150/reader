@@ -123,7 +123,7 @@ export class DataCrunchingHost extends RPCHost {
     }
 
     async crunchCacheRecords(records: Crawled[]) {
-        const throttle = new PromiseThrottle(100);
+        const throttle = new PromiseThrottle(30);
         const localFileName = this.tempFileManager.alloc();
         const fileWriteStream = createWriteStream(localFileName, { encoding: 'utf-8' });
         let nextDrainDeferred = Defer();
