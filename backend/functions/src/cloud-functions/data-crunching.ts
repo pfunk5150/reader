@@ -128,7 +128,7 @@ export class DataCrunchingHost extends RPCHost {
         const localFileName = this.tempFileManager.alloc();
         const fileWriteStream = createWriteStream(localFileName, { encoding: 'utf-8', highWaterMark: 64 * 1024 * 1024 });
         const gzStream = createGzip();
-        gzStream.pipe(fileWriteStream);
+        gzStream.pipe(fileWriteStream, { end: true });
         let nextDrainDeferred = Defer();
         nextDrainDeferred.resolve();
 
@@ -171,7 +171,7 @@ export class DataCrunchingHost extends RPCHost {
 
         await throttle.nextDrain();
 
-        fileWriteStream.end();
+        gzStream.end();
 
         const ro = {
             path: localFileName
