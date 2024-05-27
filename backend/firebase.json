@@ -41,6 +41,9 @@
     },
     "storage": {
       "port": 9097
+    },
+    "pubsub": {
+      "port": 9100
     }
   }
 }
