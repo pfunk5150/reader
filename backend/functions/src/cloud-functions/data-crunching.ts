@@ -109,8 +109,8 @@ export class DataCrunchingHost extends RPCHost {
     @CloudScheduleV2('2 0 * * *', {
         name: 'crunchPageCacheEveryday',
         runtime: {
-            cpu: 4,
-            memory: '8GiB',
+            cpu: 2,
+            memory: '4GiB',
             timeoutSeconds: 1800,
             timeZone: 'UTC',
             retryCount: 3,
@@ -118,16 +118,16 @@ export class DataCrunchingHost extends RPCHost {
         },
         tags: ['DataCrunching'],
     })
-    @CloudHTTPv2({
-        runtime: {
-            cpu: 2,
-            memory: '4GiB',
-            timeoutSeconds: 3600,
-            concurrency: 2,
-            maxInstances: 200,
-        },
-        tags: ['DataCrunching'],
-    })
+    // @CloudHTTPv2({
+    //     runtime: {
+    //         cpu: 2,
+    //         memory: '4GiB',
+    //         timeoutSeconds: 3600,
+    //         concurrency: 2,
+    //         maxInstances: 200,
+    //     },
+    //     tags: ['DataCrunching'],
+    // })
     async dispatchPageCacheCrunching(
         @RPCReflect() rpcReflect: RPCReflection,
     ) {
