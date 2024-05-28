@@ -10,7 +10,7 @@ import { RateLimitControl, RateLimitDesc } from '../shared/services/rate-limit';
 import _ from 'lodash';
 import { PageSnapshot, PuppeteerControl, ScrappingOptions } from '../services/puppeteer';
 import { Request, Response } from 'express';
-import normalizeUrl from "@esm2cjs/normalize-url";
+const pNormalizeUrl = import("@esm2cjs/normalize-url");
 import { AltTextService } from '../services/alt-text';
 import TurndownService from 'turndown';
 import { Crawled } from '../db/crawled';
@@ -137,14 +137,14 @@ export class CrawlerHost extends RPCHost {
         });
         turnDownService.addRule('improved-inline-link', {
             filter: function (node, options) {
-                return (
+                return Boolean(
                     options.linkStyle === 'inlined' &&
                     node.nodeName === 'A' &&
                     node.getAttribute('href')
                 );
             },
 
-            replacement: function (content, node) {
+            replacement: function (content, node: any) {
                 let href = node.getAttribute('href');
                 if (href) href = href.replace(/([()])/g, '\\$1');
                 let title = cleanAttribute(node.getAttribute('title'));
@@ -259,7 +259,7 @@ export class CrawlerHost extends RPCHost {
         const imageIdxTrack = new Map<string, number[]>();
         turnDownService.addRule('img-generated-alt', {
             filter: 'img',
-            replacement: (_content, node) => {
+            replacement: (_content, node: any) => {
                 let linkPreferredSrc = (node.getAttribute('src') || '').trim();
                 if (!linkPreferredSrc || linkPreferredSrc.startsWith('data:')) {
                     const dataSrc = (node.getAttribute('data-src') || '').trim();
@@ -571,6 +571,7 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
         }
 
         let urlToCrawl;
+        const normalizeUrl = (await pNormalizeUrl).default;
         try {
             urlToCrawl = new URL(normalizeUrl(noSlashURL.trim(), { stripWWW: false, removeTrailingSlash: false, removeSingleSlash: false }));
         } catch (err) {
