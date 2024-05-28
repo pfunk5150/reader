@@ -72,17 +72,20 @@ export class DataCrunchingHost extends RPCHost {
             cpu: 2,
             memory: '4GiB',
             timeoutSeconds: 3600,
+            concurrency: 2,
+            maxInstances: 200,
             retryConfig: {
                 maxAttempts: 3,
                 minBackoffSeconds: 60,
             },
             rateLimits: {
-                maxConcurrentDispatches: 200,
+                maxConcurrentDispatches: 150,
+                maxDispatchesPerSecond: 2,
             },
         },
         tags: ['DataCrunching'],
     })
-    async crunchPageCache(
+    async crunchPageCacheWorker(
         @Param('date') date: string,
         @Param('offset', { default: 0 }) offset: number
     ) {
@@ -137,9 +140,9 @@ export class DataCrunchingHost extends RPCHost {
             this.logger.info(`Dispatching ${fileName}...`);
             sse.write({ data: `Dispatching ${fileName}...` });
 
-            await getFunctions().taskQueue('crunchPageCache').enqueue({ date, offset }, {
+            await getFunctions().taskQueue('crunchPageCacheWorker').enqueue({ date, offset }, {
                 dispatchDeadlineSeconds: 1800,
-                uri: await getFunctionUrl('crunchPageCache'),
+                uri: await getFunctionUrl('crunchPageCacheWorker'),
             });
         }
 
@@ -163,7 +166,7 @@ export class DataCrunchingHost extends RPCHost {
         }
 
         while (theDay.isBefore(startOfToday)) {
-            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter}.jsonl.gz`;
+            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}/${counter}.jsonl.gz`;
             const offset = counter;
             counter += this.pageCacheCrunchingBatchSize;
             const fileExists = (await this.firebaseObjectStorage.bucket.file(fileName).exists())[0];
@@ -206,7 +209,7 @@ export class DataCrunchingHost extends RPCHost {
         let counter = 0;
 
         while (theDay.isBefore(startOfToday)) {
-            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}-${counter}.jsonl.gz`;
+            const fileName = `${this.pageCacheCrunchingPrefix}/r${this.rev}/${theDay.format('YYYY-MM-DD')}/${counter}.jsonl.gz`;
             const offset = counter;
             counter += this.pageCacheCrunchingBatchSize;
             const fileExists = (await this.firebaseObjectStorage.bucket.file(fileName).exists())[0];
