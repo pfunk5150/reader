@@ -5,7 +5,7 @@ import {
     RPCReflection,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { CloudHTTPv2, CloudScheduleV2, CloudTaskV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, Param, RPCReflect, TempFileManager } from '../shared';
+import { CloudScheduleV2, CloudTaskV2, FirebaseStorageBucketControl, Logger, OutputServerEventStream, Param, RPCReflect, TempFileManager } from '../shared';
 import _ from 'lodash';
 import { CrawlerHost } from './crawler';
 
