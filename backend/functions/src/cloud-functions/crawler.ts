@@ -234,14 +234,14 @@ export class CrawlerHost extends RPCHost {
             if (pdf) {
                 pdfMode = true;
                 snapshot.title = pdf.meta?.Title;
-                snapshot.text = snapshot.text;
+                snapshot.text = pdf.text || snapshot.text;
                 snapshot.parsed = {
                     content: pdf.content,
                     textContent: pdf.content,
                     length: pdf.content?.length,
                     byline: pdf.meta?.Author,
                     lang: pdf.meta?.Language || undefined,
-                    title: snapshot.title,
+                    title: pdf.meta?.Title,
                     publishedTime: this.pdfExtractor.parsePdfDate(pdf.meta?.ModDate || pdf.meta?.CreationDate)?.toISOString(),
                 };
             }
