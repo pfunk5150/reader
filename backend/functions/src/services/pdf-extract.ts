@@ -8,6 +8,9 @@ import { PDFContent } from '../db/pdf';
 import dayjs from 'dayjs';
 const utc = require('dayjs/plugin/utc');  // Import the UTC plugin
 dayjs.extend(utc);  // Extend dayjs with the UTC plugin
+const timezone = require('dayjs/plugin/timezone');
+dayjs.extend(timezone);
+
 const pPdfjs = import('pdfjs-dist');
 
 
@@ -271,15 +274,25 @@ export class PDFExtractor extends AsyncService {
         if (!pdfDate) {
             return undefined;
         }
-        // Remove the 'D:' prefix and the 'Z' suffix
-        const cleanedDate = pdfDate.slice(2, -1);
+        // Remove the 'D:' prefix
+        const cleanedDate = pdfDate.slice(2);
 
-        // Define the format
-        const format = 'YYYYMMDDHHmmss';
+        // Define the format without the timezone part first
+        const dateTimePart = cleanedDate.slice(0, 14);
+        const timezonePart = cleanedDate.slice(14);
 
-        // Parse the date in UTC
-        const parsedDate = dayjs.utc(cleanedDate, format);
+        // Construct the full date string in a standard format
+        const formattedDate = `${dateTimePart}${timezonePart.replace("'", "").replace("'", "")}`;
 
-        return parsedDate.toDate();
+        // Parse the date with timezone
+        const parsedDate = dayjs(formattedDate, "YYYYMMDDHHmmssZ");
+
+        const date = parsedDate.toDate();
+
+        if (!date.valueOf()) {
+            return undefined;
+        }
+
+        return date;
     }
 }
