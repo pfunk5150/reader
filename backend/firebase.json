@@ -33,17 +33,11 @@
     "functions": {
       "port": 5001
     },
-    "auth": {
-      "port": 9099
-    },
     "firestore": {
       "port": 9098
     },
     "storage": {
       "port": 9097
-    },
-    "pubsub": {
-      "port": 9100
     }
   }
 }

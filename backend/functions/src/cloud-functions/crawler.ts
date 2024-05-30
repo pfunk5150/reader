@@ -21,6 +21,7 @@ import { JinaEmbeddingsAuthDTO } from '../shared/dto/jina-embeddings-auth';
 import { countGPTToken as estimateToken } from '../shared/utils/openai';
 import { CrawlerOptions } from '../dto/scrapping-options';
 import { JinaEmbeddingsTokenAccount } from '../shared/db/jina-embeddings-token-account';
+import { PDFExtractor } from '../services/pdf-extract';
 
 const md5Hasher = new HashManager('md5', 'hex');
 
@@ -68,6 +69,7 @@ export class CrawlerHost extends RPCHost {
         protected globalLogger: Logger,
         protected puppeteerControl: PuppeteerControl,
         protected altTextService: AltTextService,
+        protected pdfExtractor: PDFExtractor,
         protected firebaseObjectStorage: FirebaseStorageBucketControl,
         protected rateLimitControl: RateLimitControl,
         protected threadLocal: AsyncContext,
@@ -75,7 +77,7 @@ export class CrawlerHost extends RPCHost {
         super(...arguments);
 
         puppeteerControl.on('crawled', async (snapshot: PageSnapshot, options: ScrappingOptions & { url: URL; }) => {
-            if (!snapshot.title?.trim()) {
+            if (!snapshot.title?.trim() && !snapshot.pdfs?.length) {
                 return;
             }
             if (options.cookies?.length) {
@@ -225,6 +227,26 @@ export class CrawlerHost extends RPCHost {
                 }
             } as FormattedPage;
         }
+
+        let pdfMode = false;
+        if (snapshot.pdfs?.length && !snapshot.title) {
+            const pdf = await this.pdfExtractor.cachedExtract(snapshot.pdfs[0]);
+            if (pdf) {
+                pdfMode = true;
+                snapshot.title = pdf.meta?.Title;
+                snapshot.text = snapshot.text;
+                snapshot.parsed = {
+                    content: pdf.content,
+                    textContent: pdf.content,
+                    length: pdf.content?.length,
+                    byline: pdf.meta?.Author,
+                    lang: pdf.meta?.Language || undefined,
+                    title: snapshot.title,
+                    publishedTime: this.pdfExtractor.parsePdfDate(pdf.meta?.ModDate || pdf.meta?.CreationDate)?.toISOString(),
+                };
+            }
+        }
+
         if (mode === 'text') {
             return {
                 ...this.getGeneralSnapshotMixins(snapshot),
@@ -235,101 +257,108 @@ export class CrawlerHost extends RPCHost {
             } as FormattedPage;
         }
 
-        const toBeTurnedToMd = mode === 'markdown' ? snapshot.html : snapshot.parsed?.content;
-        let turnDownService = mode === 'markdown' ? this.getTurndown() : this.getTurndown('without any rule');
-        for (const plugin of this.turnDownPlugins) {
-            turnDownService = turnDownService.use(plugin);
-        }
-        const urlToAltMap: { [k: string]: string | undefined; } = {};
-        if (snapshot.imgs?.length && this.threadLocal.get('withGeneratedAlt')) {
-            const tasks = _.uniqBy((snapshot.imgs || []), 'src').map(async (x) => {
-                const r = await this.altTextService.getAltText(x).catch((err: any) => {
-                    this.logger.warn(`Failed to get alt text for ${x.src}`, { err: marshalErrorLike(err) });
-                    return undefined;
+        let contentText = '';
+        const imageSummary = {} as { [k: string]: string; };
+        const imageIdxTrack = new Map<string, number[]>();
+        do {
+            if (pdfMode) {
+                contentText = snapshot.parsed?.content || snapshot.text;
+                break;
+            }
+
+            const toBeTurnedToMd = mode === 'markdown' ? snapshot.html : snapshot.parsed?.content;
+            let turnDownService = mode === 'markdown' ? this.getTurndown() : this.getTurndown('without any rule');
+            for (const plugin of this.turnDownPlugins) {
+                turnDownService = turnDownService.use(plugin);
+            }
+            const urlToAltMap: { [k: string]: string | undefined; } = {};
+            if (snapshot.imgs?.length && this.threadLocal.get('withGeneratedAlt')) {
+                const tasks = _.uniqBy((snapshot.imgs || []), 'src').map(async (x) => {
+                    const r = await this.altTextService.getAltText(x).catch((err: any) => {
+                        this.logger.warn(`Failed to get alt text for ${x.src}`, { err: marshalErrorLike(err) });
+                        return undefined;
+                    });
+                    if (r && x.src) {
+                        urlToAltMap[x.src.trim()] = r;
+                    }
                 });
-                if (r && x.src) {
-                    urlToAltMap[x.src.trim()] = r;
+
+                await Promise.all(tasks);
+            }
+            let imgIdx = 0;
+            turnDownService.addRule('img-generated-alt', {
+                filter: 'img',
+                replacement: (_content, node: any) => {
+                    let linkPreferredSrc = (node.getAttribute('src') || '').trim();
+                    if (!linkPreferredSrc || linkPreferredSrc.startsWith('data:')) {
+                        const dataSrc = (node.getAttribute('data-src') || '').trim();
+                        if (dataSrc && !dataSrc.startsWith('data:')) {
+                            linkPreferredSrc = dataSrc;
+                        }
+                    }
+
+                    let src;
+                    try {
+                        src = new URL(linkPreferredSrc, nominalUrl).toString();
+                    } catch (_err) {
+                        void 0;
+                    }
+                    const alt = cleanAttribute(node.getAttribute('alt'));
+                    if (!src) {
+                        return '';
+                    }
+                    const mapped = urlToAltMap[src];
+                    const imgSerial = ++imgIdx;
+                    const idxArr = imageIdxTrack.has(src) ? imageIdxTrack.get(src)! : [];
+                    idxArr.push(imgSerial);
+                    imageIdxTrack.set(src, idxArr);
+
+                    if (mapped) {
+                        imageSummary[src] = mapped || alt;
+
+                        return `![Image ${imgIdx}: ${mapped || alt}](${src})`;
+                    }
+
+                    imageSummary[src] = alt || '';
+
+                    return alt ? `![Image ${imgIdx}: ${alt}](${src})` : `![Image ${imgIdx}](${src})`;
                 }
             });
 
-            await Promise.all(tasks);
-        }
-        let imgIdx = 0;
-        const imageSummary = {} as { [k: string]: string; };
-        const imageIdxTrack = new Map<string, number[]>();
-        turnDownService.addRule('img-generated-alt', {
-            filter: 'img',
-            replacement: (_content, node: any) => {
-                let linkPreferredSrc = (node.getAttribute('src') || '').trim();
-                if (!linkPreferredSrc || linkPreferredSrc.startsWith('data:')) {
-                    const dataSrc = (node.getAttribute('data-src') || '').trim();
-                    if (dataSrc && !dataSrc.startsWith('data:')) {
-                        linkPreferredSrc = dataSrc;
+            if (toBeTurnedToMd) {
+                try {
+                    contentText = turnDownService.turndown(toBeTurnedToMd).trim();
+                } catch (err) {
+                    this.logger.warn(`Turndown failed to run, retrying without plugins`, { err });
+                    const vanillaTurnDownService = this.getTurndown();
+                    try {
+                        contentText = vanillaTurnDownService.turndown(toBeTurnedToMd).trim();
+                    } catch (err2) {
+                        this.logger.warn(`Turndown failed to run, giving up`, { err: err2 });
                     }
                 }
-
-                let src;
-                try {
-                    src = new URL(linkPreferredSrc, nominalUrl).toString();
-                } catch (_err) {
-                    void 0;
-                }
-                const alt = cleanAttribute(node.getAttribute('alt'));
-                if (!src) {
-                    return '';
-                }
-                const mapped = urlToAltMap[src];
-                const imgSerial = ++imgIdx;
-                const idxArr = imageIdxTrack.has(src) ? imageIdxTrack.get(src)! : [];
-                idxArr.push(imgSerial);
-                imageIdxTrack.set(src, idxArr);
-
-                if (mapped) {
-                    imageSummary[src] = mapped || alt;
-
-                    return `![Image ${imgIdx}: ${mapped || alt}](${src})`;
-                }
-
-                imageSummary[src] = alt || '';
-
-                return alt ? `![Image ${imgIdx}: ${alt}](${src})` : `![Image ${imgIdx}](${src})`;
             }
-        });
 
-        let contentText = '';
-        if (toBeTurnedToMd) {
-            try {
-                contentText = turnDownService.turndown(toBeTurnedToMd).trim();
-            } catch (err) {
-                this.logger.warn(`Turndown failed to run, retrying without plugins`, { err });
-                const vanillaTurnDownService = this.getTurndown();
+            if (
+                !contentText || (contentText.startsWith('<') && contentText.endsWith('>'))
+                && toBeTurnedToMd !== snapshot.html
+            ) {
                 try {
-                    contentText = vanillaTurnDownService.turndown(toBeTurnedToMd).trim();
-                } catch (err2) {
-                    this.logger.warn(`Turndown failed to run, giving up`, { err: err2 });
+                    contentText = turnDownService.turndown(snapshot.html);
+                } catch (err) {
+                    this.logger.warn(`Turndown failed to run, retrying without plugins`, { err });
+                    const vanillaTurnDownService = this.getTurndown();
+                    try {
+                        contentText = vanillaTurnDownService.turndown(snapshot.html);
+                    } catch (err2) {
+                        this.logger.warn(`Turndown failed to run, giving up`, { err: err2 });
+                    }
                 }
             }
-        }
-
-        if (
-            !contentText || (contentText.startsWith('<') && contentText.endsWith('>'))
-            && toBeTurnedToMd !== snapshot.html
-        ) {
-            try {
-                contentText = turnDownService.turndown(snapshot.html);
-            } catch (err) {
-                this.logger.warn(`Turndown failed to run, retrying without plugins`, { err });
-                const vanillaTurnDownService = this.getTurndown();
-                try {
-                    contentText = vanillaTurnDownService.turndown(snapshot.html);
-                } catch (err2) {
-                    this.logger.warn(`Turndown failed to run, giving up`, { err: err2 });
-                }
+            if (!contentText || (contentText.startsWith('<') || contentText.endsWith('>'))) {
+                contentText = snapshot.text;
             }
-        }
-        if (!contentText || (contentText.startsWith('<') || contentText.endsWith('>'))) {
-            contentText = snapshot.text;
-        }
+        } while (false);
 
         const cleanText = (contentText || '').trim();
 
@@ -623,7 +652,7 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
         if (!ctx.req.accepts('text/plain') && (ctx.req.accepts('text/json') || ctx.req.accepts('application/json'))) {
             for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, crawlerOptions.cacheTolerance)) {
                 lastScrapped = scrapped;
-                if (crawlerOptions.waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
+                if (crawlerOptions.waitForSelector || ((!scrapped?.parsed?.content || !scrapped.title?.trim()) && !scrapped?.pdfs?.length)) {
                     continue;
                 }
 
@@ -645,7 +674,7 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
 
         for await (const scrapped of this.cachedScrap(urlToCrawl, crawlOpts, crawlerOptions.cacheTolerance)) {
             lastScrapped = scrapped;
-            if (crawlerOptions.waitForSelector || !scrapped?.parsed?.content || !(scrapped.title?.trim())) {
+            if (crawlerOptions.waitForSelector || ((!scrapped?.parsed?.content || !scrapped.title?.trim()) && !scrapped?.pdfs?.length)) {
                 continue;
             }
 

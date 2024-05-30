@@ -50,6 +50,7 @@ export interface PageSnapshot {
     parsed?: Partial<ReadabilityParsed> | null;
     screenshot?: Buffer;
     imgs?: ImgBrief[];
+    pdfs?: string[];
 }
 
 export interface ExtendedSnapshot extends PageSnapshot {
@@ -98,7 +99,9 @@ export class PuppeteerControl extends AsyncService {
     livePages = new Set<Page>();
     lastPageCratedAt: number = 0;
 
-    constructor(protected globalLogger: Logger) {
+    constructor(
+        protected globalLogger: Logger,
+    ) {
         super(...arguments);
         this.setMaxListeners(2 * Math.floor(os.totalmem() / (256 * 1024 * 1024)) + 1); 148 - 95;
 
@@ -220,6 +223,13 @@ function briefImgs(elem) {
         };
     });
 }
+function briefPDFs() {
+    const pdfTags = Array.from(document.querySelectorAll('embed[type="application/pdf"]'));
+
+    return pdfTags.map((x)=> {
+        return x.src === 'about:blank' ? document.location.href : x.src;
+    });
+}
 function giveSnapshot(stopActiveSnapshot) {
     if (stopActiveSnapshot) {
         window.haltSnapshot = true;
@@ -238,6 +248,7 @@ function giveSnapshot(stopActiveSnapshot) {
         text: document.body?.innerText,
         parsed: parsed,
         imgs: [],
+        pdfs: briefPDFs(),
     };
     if (parsed && parsed.content) {
         const elem = document.createElement('div');
@@ -412,7 +423,7 @@ document.addEventListener('load', handlePageLoad);
                 }
                 snapshot = await page.evaluate('giveSnapshot(true)') as PageSnapshot;
                 screenshot = await page.screenshot();
-                if (!snapshot.title || !snapshot.parsed?.content) {
+                if ((!snapshot.title || !snapshot.parsed?.content) && !(snapshot.pdfs?.length)) {
                     const salvaged = await this.salvage(url, page);
                     if (salvaged) {
                         snapshot = await page.evaluate('giveSnapshot(true)') as PageSnapshot;
