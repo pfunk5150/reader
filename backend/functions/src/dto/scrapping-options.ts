@@ -86,6 +86,11 @@ import { parseString as parseSetCookieString } from 'set-cookie-parser';
                     in: 'header',
                     schema: { type: 'string' }
                 },
+                'X-User-Agent': {
+                    description: `Override User-Agent.`,
+                    in: 'header',
+                    schema: { type: 'string' }
+                },
             }
         }
     }
@@ -134,6 +139,9 @@ export class CrawlerOptions extends AutoCastable {
     @Prop()
     proxyUrl?: string;
 
+    @Prop()
+    userAgent?: string;
+
     static override from(input: any) {
         const instance = super.from(input) as CrawlerOptions;
         const ctx = Reflect.get(input, RPC_CALL_ENVIRONMENT) as {
@@ -174,6 +182,8 @@ export class CrawlerOptions extends AutoCastable {
         instance.targetSelector ??= targetSelector;
         const waitForSelector = ctx?.req.get('x-wait-for-selector');
         instance.waitForSelector ??= waitForSelector || instance.targetSelector;
+        const overrideUserAgent = ctx?.req.get('x-user-agent');
+        instance.userAgent ??= overrideUserAgent;
 
         const cookies: CookieParam[] = [];
         const setCookieHeaders = ctx?.req.headers['x-set-cookie'] || (instance.setCookies as any as string[]);

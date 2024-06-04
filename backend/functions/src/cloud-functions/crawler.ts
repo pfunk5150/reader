@@ -869,6 +869,7 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
         this.threadLocal.set('withLinksSummary', opts.withLinksSummary);
         this.threadLocal.set('withImagesSummary', opts.withImagesSummary);
         this.threadLocal.set('cacheTolerance', opts.cacheTolerance);
+        this.threadLocal.set('userAgent', opts.userAgent);
 
         const crawlOpts: ExtraScrappingOptions = {
             proxyUrl: opts.proxyUrl,
@@ -876,6 +877,7 @@ ${suffixMixins.length ? `\n${suffixMixins.join('\n\n')}\n` : ''}`;
             favorScreenshot: opts.respondWith === 'screenshot',
             waitForSelector: opts.waitForSelector,
             targetSelector: opts.targetSelector,
+            overrideUserAgent: opts.userAgent,
         };
 
         return crawlOpts;
