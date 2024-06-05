@@ -69,7 +69,7 @@ export class InterrogatorHost extends RPCHost {
                 return url.protocol === 'http:' || url.protocol === 'https:';
             }
         }) url: URL,
-        @Param('model', { default: 'gpt-4o' }) model: string,
+        @Param('model', { default: 'gpt-3.5-turbo' }) model: string,
         @Param('question', {
             type: String,
             required: true,
