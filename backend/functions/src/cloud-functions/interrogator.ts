@@ -11,10 +11,11 @@ import { JinaEmbeddingsAuthDTO } from '../shared/dto/jina-embeddings-auth';
 import { CrawlerHost } from './crawler';
 
 import { SearcherHost } from './searcher';
-import { LLMModelOptions } from '../shared/dto/llm';
+import { LLMModelOptions, LLMModelOptionsOpenAICompat } from '../shared/dto/llm';
 import { readFile } from 'fs/promises';
-import { CrawlerOptions } from '../dto/scrapping-options';
+import { CrawlerOptions, CrawlerOptionsHeaderOnly } from '../dto/scrapping-options';
 import { Readable } from 'stream';
+
 
 
 @singleton()
@@ -45,7 +46,7 @@ export class InterrogatorHost extends RPCHost {
             cpu: 4,
             memory: '8GiB',
             timeoutSeconds: 300,
-            concurrency: 4,
+            concurrency: 8,
             maxInstances: 200,
         },
         exportInGroup: ['api'],
@@ -150,7 +151,7 @@ export class InterrogatorHost extends RPCHost {
             cpu: 4,
             memory: '8GiB',
             timeoutSeconds: 300,
-            concurrency: 4,
+            concurrency: 8,
             maxInstances: 200,
         },
         exportInGroup: ['api'],
@@ -165,22 +166,9 @@ export class InterrogatorHost extends RPCHost {
             res: Response,
         },
         auth: JinaEmbeddingsAuthDTO,
-        inputOptions: LLMModelOptions,
-        crawlerOptions: CrawlerOptions,
-        @Param('url', {
-            required: true,
-            validate(url: URL) {
-                return url.protocol === 'http:' || url.protocol === 'https:';
-            }
-        }) url: URL,
-        @Param('model', { default: 'gpt-4o' }) model: string,
-        @Param('question', {
-            type: String,
-            required: true,
-            validate(txt: string) {
-                return txt.length > 0 && countGPTToken(txt) <= 2048;
-            }
-        }) prompt: string,
+        inputOptions: LLMModelOptionsOpenAICompat,
+        crawlerOptions: CrawlerOptionsHeaderOnly,
+        @Param('model', { default: 'gpt-3.5-turbo' }) model: string,
         @Param('expandImages') expandImages?: boolean,
     ) {
         const uid = await auth.solveUID();
@@ -228,17 +216,8 @@ export class InterrogatorHost extends RPCHost {
         }
 
         const mdl = this.llmManager.assertModel(model);
-        const crawlerConf = this.crawler.configure(crawlerOptions);
-        this.threadLocal.set('expandImages', expandImages ?? false);
-        const page = await this.crawler.simpleCrawl(crawlerOptions.respondWith, url, crawlerConf);
 
-        const content = page.toString();
-        const promptChunks = expandImages ? await this.expandMarkdown(content) : [content];
-        promptChunks.unshift('===== Start Of Webpage Content =====\n');
-        promptChunks.push('===== End Of Webpage Content =====\n\n');
-        promptChunks.push(`${prompt}`);
-
-        const r = await mdl.exec(promptChunks, inputOptions);
+        const r = await mdl.exec('', inputOptions);
 
         if (Readable.isReadable(r as any)) {
             const outputStream = new OutputServerEventStream();
