@@ -6,6 +6,7 @@ initializeApp();
 
 import { loadModulesDynamically, registry } from './shared';
 import path from 'path';
+import { llmToolFunctionsRegistry } from './cloud-functions/llm-tools';
 loadModulesDynamically(path.resolve(__dirname, 'cloud-functions'));
 
 Object.assign(exports, registry.exportAll());
@@ -14,6 +15,7 @@ Object.assign(exports, registry.exportGrouped({
     timeoutSeconds: 540,
 }));
 registry.allHandsOnDeck().catch(() => void 0);
+llmToolFunctionsRegistry.allHandsOnDeck().catch(() => void 0);
 registry.title = 'reader';
 registry.version = '0.1.0';
 

@@ -188,7 +188,7 @@ export class CrawlerOptions extends AutoCastable {
             instance.cacheTolerance = cacheTolerance;
         }
 
-        let timeoutSeconds = parseInt(ctx?.req.get('x-timeout') || '');
+        let timeoutSeconds = parseFloat(ctx?.req.get('x-timeout') || '');
         if (!isNaN(timeoutSeconds) && timeoutSeconds > 0 && timeoutSeconds <= 180) {
             instance.timeout = timeoutSeconds;
         }

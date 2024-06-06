@@ -1,9 +1,10 @@
 import {
+    AssertionFailureError,
     assignTransferProtocolMeta, marshalErrorLike,
     RPCHost, RPCReflection, UploadedFile,
 } from 'civkit';
 import { singleton } from 'tsyringe';
-import { AsyncContext, countGPTToken, Ctx, InsufficientBalanceError, LLMManager, Logger, OutputServerEventStream, Param, PromptChunk, RPCMethod, RPCReflect } from '../shared';
+import { AsyncContext, countGPTToken, Ctx, InsufficientBalanceError, LLMManager, Logger, OutputOpenAIChatCompletionResponseStream, OutputServerEventStream, Param, parseJSON, PromptChunk, RPCMethod, RPCReflect, trimMessages } from '../shared';
 import { RateLimitControl, RateLimitDesc } from '../shared/services/rate-limit';
 import _ from 'lodash';
 import { Request, Response } from 'express';
@@ -14,7 +15,9 @@ import { SearcherHost } from './searcher';
 import { LLMModelOptions, LLMModelOptionsOpenAICompat } from '../shared/dto/llm';
 import { readFile } from 'fs/promises';
 import { CrawlerOptions, CrawlerOptionsHeaderOnly } from '../dto/scrapping-options';
-import { Readable } from 'stream';
+import { once, Readable } from 'stream';
+import { LLMToolFunctionsRegistry } from './llm-tools';
+import { JSONAccumulation, JSONParserStream } from '../shared/lib/json-parse-stream';
 
 
 
@@ -29,8 +32,9 @@ export class InterrogatorHost extends RPCHost {
 
         protected crawler: CrawlerHost,
         protected searcher: SearcherHost,
-
         protected llmManager: LLMManager,
+
+        protected llmToolsRegistry: LLMToolFunctionsRegistry,
     ) {
         super(...arguments);
     }
@@ -157,7 +161,7 @@ export class InterrogatorHost extends RPCHost {
         exportInGroup: ['api'],
         tags: ['Interrogator'],
         httpMethod: ['get', 'post'],
-        returnType: [String, OutputServerEventStream],
+        returnType: OutputServerEventStream,
     })
     async chatWithReader(
         @RPCReflect() rpcReflect: RPCReflection,
@@ -166,13 +170,20 @@ export class InterrogatorHost extends RPCHost {
             res: Response,
         },
         auth: JinaEmbeddingsAuthDTO,
-        inputOptions: LLMModelOptionsOpenAICompat,
+        options: LLMModelOptionsOpenAICompat,
         crawlerOptions: CrawlerOptionsHeaderOnly,
         @Param('model', { default: 'gpt-3.5-turbo' }) model: string,
-        @Param('expandImages') expandImages?: boolean,
+        @Param('maxAdditionalTurns', {
+            type: Number,
+            default: 5,
+            validate(turns: number) {
+                return turns >= 0 && turns <= 50;
+            }
+        }) maxAdditionalTurns: number,
     ) {
         const uid = await auth.solveUID();
         let chargeAmount = 0;
+        options.stream = true;
 
         if (uid) {
             const user = await auth.assertUser();
@@ -215,18 +226,229 @@ export class InterrogatorHost extends RPCHost {
             });
         }
 
+        options.max_tokens ??= 4096;
+        this.crawler.configure(crawlerOptions);
+
         const mdl = this.llmManager.assertModel(model);
+        if (!mdl.streamingSupported) {
+            throw new AssertionFailureError(`Model ${model} does not support streaming.`);
+        }
+        const functionsMixin = this.llmToolsRegistry.getPromptMixin(options);
 
-        const r = await mdl.exec('', inputOptions);
-
-        if (Readable.isReadable(r as any)) {
-            const outputStream = new OutputServerEventStream();
-            (r as any as Readable).pipe(outputStream);
-
-            return outputStream;
+        if (!mdl.functionCallingSupported) {
+            options.system = `${options.system ? `${options.system}\n\n` : ''}${functionsMixin.system}`;
         }
 
-        return assignTransferProtocolMeta(r.trim() + '\n', { contentType: 'text/plain', envelope: null });
+        const sseStream = new OutputOpenAIChatCompletionResponseStream(mdl.name, {
+            highWaterMark: 2 * 1024 * 1024
+        });
+
+        const tailMessages = [];
+        let callRoundsLeft = maxAdditionalTurns;
+        let keepLooping = true;
+        const trimmedMessages = trimMessages('', options, mdl.windowSize - options.max_tokens);
+        const waitList: Promise<any>[] = [];
+
+        while (keepLooping && callRoundsLeft > 0) {
+            let softwareFunctionCallingInAction = false;
+            const thisOptions = { ...options };
+            if (functionsMixin.functions && callRoundsLeft > 1) {
+                thisOptions.functions = functionsMixin.functions;
+                if (!mdl.functionCallingSupported && mdl.systemSupported) {
+                    thisOptions.system = `${thisOptions.system || ''}${thisOptions.system ? '\n\n' : ''}${functionsMixin.system}`;
+                    softwareFunctionCallingInAction = true;
+                }
+            }
+            thisOptions.messages = [...trimmedMessages, ...tailMessages];
+
+            const ret = await mdl.exec('', thisOptions);
+            callRoundsLeft--;
+
+            const retStream = (ret as any as Readable);
+            if (!Readable.isReadable(retStream)) {
+                throw new AssertionFailureError('Model did not return a stream');
+            }
+
+            // Start pseudo function calling block
+            const jsonParserStream = new JSONParserStream({
+                expectControlCharacterInString: true,
+                expectCasingInLiteral: true,
+                expectAbruptTerminationOfInput: true,
+                expectContaminated: 'object',
+                swallowErrors: true
+            });
+            const jsonAccumulationStream = new JSONAccumulation();
+            jsonAccumulationStream.on('error', () => 'Do Not Throw');
+            jsonParserStream.pipe(jsonAccumulationStream, { end: true });
+            jsonParserStream.once('error', (err) => {
+                this.logger.error('JSON parser error', { err });
+                jsonAccumulationStream.destroy(err);
+            });
+            jsonAccumulationStream.on('data', (snapshot) => {
+                if (!snapshot || typeof snapshot !== 'object') {
+                    return;
+                }
+                sseStream.write({
+                    event: 'snapshot',
+                    data: snapshot,
+                });
+            });
+            jsonAccumulationStream.once('final', (final) => {
+                if (!final || typeof final !== 'object') {
+                    return;
+                }
+                sseStream.write({
+                    event: 'structured',
+                    data: final,
+                });
+                if (final.intention !== 'USE_TOOLS') {
+                    return;
+                }
+                const toolCalls = final.tools;
+                if (!Array.isArray(toolCalls)) {
+                    return;
+                }
+                if (softwareFunctionCallingInAction) {
+                    tailMessages.push({ role: 'assistant', content: JSON.stringify(final) });
+                    for (const toolCall of toolCalls) {
+                        retStream.emit('call', toolCall, toolCall.id);
+                    }
+                }
+            });
+            retStream.once('end', () => {
+                jsonParserStream.end();
+            });
+            jsonParserStream.once('n1', (n1) => {
+                sseStream.write({
+                    event: 'n1',
+                    data: n1,
+                });
+            });
+            jsonParserStream.once('n2', (n2) => {
+                sseStream.write({
+                    event: 'n2',
+                    data: n2,
+                });
+            });
+            // End pseudo function calling block
+
+            let resp = '';
+            retStream.on('data', (chunk) => {
+                if (typeof chunk !== 'string') {
+                    resp = chunk;
+                    return;
+                }
+                resp = `${resp}${chunk}`;
+                jsonParserStream.write(chunk);
+                sseStream.write({
+                    event: 'chunk',
+                    data: chunk,
+                });
+            });
+
+            retStream.on('call', (params: { name: string, arguments: any; }, callId?: string) => {
+                if (!params?.name) {
+                    return;
+                }
+
+                waitList.push(new Promise(async (resolve, _reject) => {
+                    let result: any = '';
+                    try {
+                        const parsedArgs = typeof params.arguments === 'string' ? parseJSON(params.arguments, {
+                            expectControlCharacterInString: true,
+                            expectContaminated: 'object',
+                        }) : (params.arguments || {});
+
+                        sseStream.write({
+                            event: 'call',
+                            data: {
+                                name: params.name,
+                                arguments: parsedArgs,
+                                id: callId,
+                            },
+                        });
+
+                        sseStream.write(`Calling tool ${params.name} with arguments: ${JSON.stringify(parsedArgs, undefined, 2)}`);
+
+                        result = await this.llmToolsRegistry.exec(
+                            params.name,
+                            parsedArgs
+                        );
+
+                        sseStream.write({
+                            event: 'return',
+                            data: {
+                                name: params.name,
+                                content: result,
+                                id: callId,
+                            },
+                        });
+
+                    } catch (err: any) {
+                        result = `${err}`;
+                    }
+
+                    const historyItem = callId ? {
+                        role: 'tool',
+                        content: result,
+                        tool_call_id: callId,
+                    } : {
+                        role: 'function',
+                        content: result,
+                        name: params.name,
+                    };
+                    tailMessages.push(historyItem);
+                    sseStream.write({
+                        event: 'injectHistory',
+                        data: historyItem
+                    });
+
+                    resolve(result);
+                }));
+
+            });
+
+            retStream.once('error', (err) => {
+                keepLooping = false;
+                jsonParserStream.end();
+                if (!sseStream.writableEnded) {
+                    sseStream.end({
+                        event: 'error',
+                        data: `${err.name}: ${err.message}`,
+                    });
+                }
+            });
+
+            await Promise.all([once(retStream, 'close'), once(jsonAccumulationStream, 'close')]);
+            if (!waitList.length) {
+                keepLooping = false;
+            }
+            const history = Reflect.get(retStream, 'history') || {
+                role: 'assistant',
+                content: resp,
+            };
+            if (keepLooping) {
+                if (!softwareFunctionCallingInAction) {
+                    // For softwareFunctionCallingInAction, history pushed in finalization of jsonAccumulationStream
+                    tailMessages.push(history);
+                }
+                sseStream.write({
+                    event: 'injectHistory',
+                    data: history,
+                });
+            } else {
+                sseStream.write({
+                    event: 'history',
+                    data: history,
+                });
+            }
+
+            await Promise.all(waitList);
+            waitList.length = 0;
+        }
+        sseStream.end();
+
+        return sseStream;
     }
 
 

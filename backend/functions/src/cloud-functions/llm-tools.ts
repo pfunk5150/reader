@@ -1,4 +1,4 @@
-import { AbstractRPCRegistry, RPCHost, OpenAPIManager } from 'civkit';
+import { AbstractRPCRegistry, RPCHost, OpenAPIManager, AsyncService } from 'civkit';
 import { container, singleton } from 'tsyringe';
 import { LLMModelOptions } from '../shared/services/common-llm';
 import { Logger } from '../shared';
@@ -6,7 +6,7 @@ import { CrawlerHost } from './crawler';
 import { SearcherHost } from './searcher';
 
 @singleton()
-export class InteractiveOptimizerFunctionsRegistry2 extends AbstractRPCRegistry {
+export class LLMToolFunctionsRegistry extends AbstractRPCRegistry {
     override container = container;
 
     openAPIManager = new OpenAPIManager();
@@ -15,6 +15,19 @@ export class InteractiveOptimizerFunctionsRegistry2 extends AbstractRPCRegistry 
         super(...arguments);
 
         this.openAPIManager.enrichDescriptions = false;
+    }
+
+    allHandsOnDeck() {
+        const hosts = [];
+        for (const [name, _options] of this.conf) {
+            const host = this.host(name);
+            if (host instanceof AsyncService) {
+                hosts.push(host);
+            }
+        }
+        hosts.push(this);
+
+        return Promise.all(hosts.map((x) => x.serviceReady()));
     }
 
     getFunctionsCallingDescriptors(whitelist?: string[]) {
@@ -94,8 +107,8 @@ ${enforce ? `At this time, you MUST invoke the tool named "${enforce}". This is 
         return { system: systemPrompt, functions: descriptors };
     }
 }
-const oFn = container.resolve(InteractiveOptimizerFunctionsRegistry2);
-
+export const llmToolFunctionsRegistry = container.resolve(LLMToolFunctionsRegistry);
+const oFn = llmToolFunctionsRegistry;
 
 @singleton()
 export class ReaderAsLLMTools extends RPCHost {
@@ -116,7 +129,7 @@ export class ReaderAsLLMTools extends RPCHost {
     }
 
     @oFn.Method({
-        desc: `Browse and return the content of a specific url.`
+        desc: `Browse and return the content of a specific url using a browser.`
     })
     async browse(
         @oFn.Param('url', {
