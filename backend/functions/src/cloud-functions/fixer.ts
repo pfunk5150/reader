@@ -3,7 +3,7 @@ import {
 } from 'civkit';
 import { singleton } from 'tsyringe';
 import {
-    Logger
+    Logger, RPCMethod
 } from '../shared';
 import _ from 'lodash';
 
@@ -18,11 +18,6 @@ import { SearchResult } from '../db/searched';
 @singleton()
 export class FixerHost extends RPCHost {
     logger = this.globalLogger.child({ service: this.constructor.name });
-
-    pageCacheCrunchingPrefix = 'crunched-pages';
-    pageCacheCrunchingBatchSize = 5000;
-    pageCacheCrunchingTMinus = 6 * 24 * 60 * 60 * 1000;
-    rev = 7;
 
     constructor(
         protected globalLogger: Logger,
@@ -111,6 +106,13 @@ export class FixerHost extends RPCHost {
         this.logger.info(`Done fixing ${i} SearchResult records`);
     }
 
+    @RPCMethod({
+        exportInGroup: ['api'],
+        httpMethod: ['get', 'post'],
+        runtime: {
+            timeoutSeconds: 3600,
+        }
+    })
     async fixAll() {
         await Promise.all([
             this.fixApiRoll(),
