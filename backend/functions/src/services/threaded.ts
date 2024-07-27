@@ -74,6 +74,16 @@ export class ThreadedServiceRegistry extends AbstractRPCRegistry {
         this.notifyOngoingTasks();
         setInterval(()=> this.notifyOngoingTasks(), 1000).unref();
 
+        parentPort!.on('message', (msg) => {
+            if (msg?.channel === this.constructor.name && msg?.event === 'exec') {
+                this.ongoingTasks = msg.data;
+            }
+        });
+        parentPort!.once('error', (err) => {
+            console.error(err);
+            process.exit(1);
+        });
+
         this.emit('ready');
     }
 
@@ -83,3 +93,12 @@ const instance = container.resolve(ThreadedServiceRegistry);
 
 export default instance;
 export const { Method: ThreadedMethod, Param, Ctx, RPCReflect } = instance.decorators();
+
+
+const FROM_MESSAGE_PORT_SYMBOL = Symbol('FROM_MESSAGE_PORT');
+
+export function fromMessagePort<T extends abstract new (...args: any) => any>(this: T, port: MessagePort, instant: object): InstanceType<T> {
+    Object.setPrototypeOf(instant, this.prototype);
+
+    return instant as any;
+}
