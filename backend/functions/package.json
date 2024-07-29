@@ -68,7 +68,7 @@
     "@types/bcrypt": "^5.0.0",
     "@types/cors": "^2.8.17",
     "@types/generic-pool": "^3.8.1",
-    "@types/node": "^18",
+    "@types/node": "^20.14.13",
     "@types/set-cookie-parser": "^2.4.7",
     "@typescript-eslint/eslint-plugin": "^5.12.0",
     "@typescript-eslint/parser": "^5.12.0",
