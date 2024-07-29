@@ -1,4 +1,5 @@
 import { AsyncService } from 'civkit';
+import { Duplex, Readable, Writeable } from 'node:stream';
 import { parentPort, threadId } from 'node:worker_threads';
 type Constructor<T = any> = abstract new (...args: any) => T;
 
@@ -118,6 +119,7 @@ export class PseudoTransfer extends AsyncService {
             propertyDescriptors: {},
             mixins: [],
         } as ObjectDescriptor | FunctionDescriptor;
+        const omitProperties = new Set();
 
         if (Array.isArray(input)) {
             (desc as ObjectDescriptor).nativeValue = [];
@@ -127,16 +129,34 @@ export class PseudoTransfer extends AsyncService {
 
         if (typeof input?.then === 'function') {
             desc.mixins!.push('Promise');
+            omitProperties.add('domain');
         }
         if (typeof input?.emit === 'function') {
             desc.mixins!.push('EventEmitter');
+            omitProperties.add('domain');
+            omitProperties.add('_events');
+            omitProperties.add('_eventsCount');
         }
         if (typeof input?.[Symbol.asyncIterator] === 'function') {
             desc.mixins!.push('AsyncIterable');
+            if (input instanceof Readable) {
+                omitProperties.add('domain');
+                omitProperties.add('_readableState');
+            } else if (input instanceof Writeable) {
+                omitProperties.add('domain');
+                omitProperties.add('_writableState');
+            } else if (input instanceof Duplex) {
+                omitProperties.add('domain');
+                omitProperties.add('_readableState');
+                omitProperties.add('_writableState');
+            }
         }
 
         for (const [key, descriptor] of Object.entries(propertyDescriptors)) {
             if (typeof key !== 'string') {
+                continue;
+            }
+            if (omitProperties.has(key)) {
                 continue;
             }
             const mappedDesc = {
@@ -376,4 +396,9 @@ export function toMessagePort<T extends abstract new (...args: any) => any>(this
     }
 
     return ports;
+}
+
+
+export function streamToAsyncIterable(theStream: Stream) {
+
 }
