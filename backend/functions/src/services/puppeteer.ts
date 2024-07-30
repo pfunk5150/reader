@@ -524,7 +524,7 @@ document.addEventListener('load', handlePageLoad);
                 }
                 try {
                     snapshot = await page.evaluate('giveSnapshot(true)') as PageSnapshot;
-                    screenshot = await page.screenshot();
+                    screenshot = await page.screenshot({ fullPage: true });
                 } catch (err: any) {
                     this.logger.warn(`Page ${sn}: Failed to finalize ${url}`, { err: marshalErrorLike(err) });
                     if (stuff instanceof Error) {
@@ -543,7 +543,7 @@ document.addEventListener('load', handlePageLoad);
                         const salvaged = await this.salvage(url, page);
                         if (salvaged) {
                             snapshot = await page.evaluate('giveSnapshot(true)') as PageSnapshot;
-                            screenshot = await page.screenshot();
+                            screenshot = await page.screenshot({ fullPage: true });
                         }
                     }
                 } catch (err: any) {
@@ -573,7 +573,7 @@ document.addEventListener('load', handlePageLoad);
                     page.waitForSelector(options.waitForSelector!, { timeout: thisTimeout }))
                     .then(async () => {
                         snapshot = await page.evaluate('giveSnapshot(true)') as PageSnapshot;
-                        screenshot = await page.screenshot();
+                        screenshot = await page.screenshot({ fullPage: true });
                         finalized = true;
                     })
                     .catch((err) => {
@@ -607,7 +607,7 @@ document.addEventListener('load', handlePageLoad);
                     break;
                 }
                 if (options?.favorScreenshot && snapshot?.title && snapshot?.html !== lastHTML) {
-                    screenshot = await page.screenshot();
+                    screenshot = await page.screenshot({ fullPage: true });
                     lastHTML = snapshot.html;
                 }
                 if (snapshot || screenshot) {
