@@ -1,5 +1,6 @@
-import { AsyncService } from 'civkit';
-import { Duplex, Readable, Writable } from 'node:stream';
+import { AsyncService, isPrimitiveLike } from 'civkit';
+import _ from 'lodash';
+import { Duplex, EventEmitter, Readable, Writable } from 'node:stream';
 import { parentPort, threadId } from 'node:worker_threads';
 type Constructor<T = any> = abstract new (...args: any) => T;
 
@@ -48,6 +49,52 @@ function isNativelyTransferable(input: object) {
     }
 
     return false;
+}
+
+export const SYM_PSEUDO_TRANSFERABLE = Symbol('PseudoTransferable');
+export interface PseudoTransferableOptions {
+    copyOwnProperty: 'all' | 'none' | 'enumerable' | string[];
+    ignoreOwnProperty?: string[];
+
+    imitateMethods?: string[];
+    imitateSpecialTraits?: Array<'EventEmitter' | 'Promise' | 'AsyncIterator'>;
+}
+export interface PseudoTransferable {
+    [SYM_PSEUDO_TRANSFERABLE]: () => PseudoTransferableOptions;
+}
+
+type TransferMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+export interface PseudoTransferProfile {
+    path: string[];
+    oid: string;
+    mode: TransferMode;
+    constructorName?: string;
+    traits?: PseudoTransferableOptions['imitateSpecialTraits'];
+}
+
+export function detectSpecialTraits(input: any) {
+    if (!input || !['function', 'object'].includes(typeof input)) {
+        return undefined;
+    }
+
+    const traits: Array<'EventEmitter' | 'Promise' | 'AsyncIterator'> = [];
+
+    if (typeof input.then === 'function') {
+        traits.push('Promise');
+    }
+    if (input instanceof EventEmitter) {
+        traits.push('EventEmitter');
+    }
+    if (typeof input?.[Symbol.asyncIterator] === 'function') {
+        traits.push('AsyncIterator');
+    }
+
+    if (traits.length) {
+        return traits;
+    }
+
+    return undefined;
 }
 
 export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService {
@@ -179,6 +226,40 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
         }
 
         return desc;
+    }
+
+    prepareForTransfer(input: any): PseudoTransferProfile[] {
+        if ((typeof input !== 'object' && typeof input !== 'function') || !input) {
+            return [];
+        }
+
+        const profiles: PseudoTransferProfile[] = [];
+
+        const transferSettings: PseudoTransferableOptions | undefined = input[SYM_PSEUDO_TRANSFERABLE]?.();
+        if (typeof input === 'function' || transferSettings?.imitateMethods?.length || transferSettings?.imitateSpecialTraits?.length) {
+            const id = this.track(input);
+            profiles.push({
+                oid: id,
+                path: [],
+                mode: 7,
+                constructorName: input.constructor?.name,
+                traits: detectSpecialTraits(input),
+            });
+        }
+
+        for (const [path, val, mode, traits] of deepVectorizeForTransfer(input)) {
+            const id = this.track(val);
+            profiles.push({
+                oid: id,
+                path,
+                mode,
+                constructorName: val.constructor?.name,
+                traits: traits || detectSpecialTraits(val),
+            });
+        }
+
+
+        return profiles;
     }
 
     callRemoteFunction(origin: T, fnOid: string, thisArgOid: string, args: any[]) {
@@ -445,4 +526,84 @@ export function toMessagePort<T extends abstract new (...args: any) => any>(this
 
 export function streamToAsyncIterable(theStream: Stream) {
 
+}
+
+
+function getConfigMode(d: PropertyDescriptor) {
+    return ((d.enumerable ? 1 << 2 : 0) | (d.writable ? 1 << 1 : 0) | (d.configurable ? 1 : 0)) as TransferMode;
+}
+
+export function* deepVectorizeForTransfer(obj: any, stack: string[] = [], refStack: Set<any> = new Set()): Iterable<[string[], any, TransferMode, PseudoTransferableOptions['imitateSpecialTraits']]> {
+    if (!(obj && typeof obj.hasOwnProperty === 'function')) {
+        return;
+    }
+
+    const propertyDescriptors = Object.getOwnPropertyDescriptors(obj);
+    const transferSettings: PseudoTransferableOptions | undefined = obj[SYM_PSEUDO_TRANSFERABLE]?.();
+
+    if (Array.isArray(transferSettings?.imitateMethods)) {
+        for (const m of transferSettings!.imitateMethods) {
+            if (m in propertyDescriptors) {
+                continue;
+            }
+            const val = Reflect.get(obj, m);
+            if (typeof val !== 'function') {
+                continue;
+            }
+            const valTransferSettings: PseudoTransferableOptions | undefined = val[SYM_PSEUDO_TRANSFERABLE]?.();
+
+            yield [stack.concat(m), val, 0, valTransferSettings?.imitateSpecialTraits];
+        }
+    }
+
+    for (const [name, descriptor] of Object.entries(propertyDescriptors)) {
+        if (typeof name !== 'string') {
+            continue;
+        }
+        if (transferSettings?.ignoreOwnProperty?.includes(name)) {
+            continue;
+        }
+        if ((!transferSettings?.copyOwnProperty || (transferSettings.copyOwnProperty === 'enumerable')) && !descriptor.enumerable) {
+            continue;
+        } else if (transferSettings?.copyOwnProperty === 'none') {
+            continue;
+        } else if (Array.isArray(transferSettings?.copyOwnProperty) && !transferSettings!.copyOwnProperty.includes(name)) {
+            continue;
+        }
+        let val;
+        try {
+            val = Reflect.get(obj, name);
+        } catch (err) {
+            // Maybe some kind of getter and it throws.
+            val = null;
+        }
+
+        const valTransferSettings: PseudoTransferableOptions | undefined = val[SYM_PSEUDO_TRANSFERABLE]?.();
+
+        if (refStack.has(val)) {
+            // Circular
+            yield [stack.concat(name), val, getConfigMode(descriptor as PropertyDescriptor), valTransferSettings?.imitateSpecialTraits];
+
+            continue;
+        }
+        refStack.add(val);
+
+        if (isPrimitiveLike(val) && typeof val !== 'function' && !descriptor.enumerable) {
+            yield [stack.concat(name), val, getConfigMode(descriptor as PropertyDescriptor), valTransferSettings?.imitateSpecialTraits];
+
+            continue;
+        }
+
+        if (val !== null && typeof val === 'object' || typeof val === 'function') {
+            if ((!_.isPlainObject(val) && !_.isArray(val) && !_.isArguments(val)) || valTransferSettings?.imitateSpecialTraits) {
+                yield [stack.concat(name), val, getConfigMode(descriptor as PropertyDescriptor), valTransferSettings?.imitateSpecialTraits];
+            }
+
+            yield* deepVectorizeForTransfer(val, stack.concat(name), refStack);
+        } else {
+            yield [stack.concat(name), val, getConfigMode(descriptor as PropertyDescriptor), valTransferSettings?.imitateSpecialTraits];
+        }
+    }
+
+    return;
 }
