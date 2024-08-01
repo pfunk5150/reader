@@ -4,53 +4,6 @@ import { Duplex, EventEmitter, Readable, Writable } from 'node:stream';
 import { parentPort, threadId } from 'node:worker_threads';
 type Constructor<T = any> = abstract new (...args: any) => T;
 
-type SpecialMixin = 'Promise' | 'EventEmitter' | 'AsyncIterable';
-
-interface PropertyDescriptor {
-    type: 'property' | 'getter&setter' | 'getter' | 'setter';
-    value?: AnyDescriptor;
-    writable: boolean;
-    enumerable: boolean;
-    configurable: boolean;
-}
-
-interface ObjectDescriptor {
-    type: 'object';
-    oid: string;
-    propertyDescriptors: {
-        [key: string]: PropertyDescriptor;
-    };
-    constructorName: string;
-    nativeValue?: any;
-    mixins?: SpecialMixin[];
-}
-interface FunctionDescriptor {
-    type: 'function';
-    oid: string;
-    propertyDescriptors: {
-        [key: string]: PropertyDescriptor;
-    };
-    mixins?: SpecialMixin[];
-}
-interface ValueDescriptor {
-    type: 'primitive';
-    value: number | boolean | string | null | undefined | bigint;
-}
-
-type AnyDescriptor = ObjectDescriptor | FunctionDescriptor | ValueDescriptor;
-
-const NATIVELY_TRANSFERABLE = [Map, Set, RegExp, BigInt, Date, ArrayBuffer, SharedArrayBuffer, WebAssembly.Module];
-function isNativelyTransferable(input: object) {
-
-    for (const x of NATIVELY_TRANSFERABLE) {
-        if (input instanceof x) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 export const SYM_PSEUDO_TRANSFERABLE = Symbol('PseudoTransferable');
 
 type SpecialTraits = 'EventEmitter' | 'Promise' | 'AsyncIterator' | 'thisArg';
@@ -150,85 +103,6 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
             throw new Error(`Duplicated type name: ${type.name}`);
         }
         this.pseudoTransferableTypes.set(type.name, type);
-    }
-
-
-    export(input: any): AnyDescriptor {
-        if (typeof input !== 'object' && typeof input !== 'function') {
-            return {
-                type: 'primitive',
-                value: input,
-            };
-        }
-
-        const id = this.track(input);
-        const propertyDescriptors = Object.getOwnPropertyDescriptors(input);
-        const desc = {
-            type: typeof input,
-            constructorName: input.constructor.name,
-            oid: id,
-            propertyDescriptors: {},
-            mixins: [],
-        } as ObjectDescriptor | FunctionDescriptor;
-        const omitProperties = new Set();
-
-        if (Array.isArray(input)) {
-            (desc as ObjectDescriptor).nativeValue = [];
-        } else if (isNativelyTransferable(input)) {
-            (desc as ObjectDescriptor).nativeValue = input;
-        }
-
-        if (typeof input?.then === 'function') {
-            desc.mixins!.push('Promise');
-            omitProperties.add('domain');
-        }
-        if (typeof input?.emit === 'function') {
-            desc.mixins!.push('EventEmitter');
-            omitProperties.add('domain');
-            omitProperties.add('_events');
-            omitProperties.add('_eventsCount');
-        }
-        if (typeof input?.[Symbol.asyncIterator] === 'function') {
-            desc.mixins!.push('AsyncIterable');
-            if (input instanceof Readable) {
-                omitProperties.add('domain');
-                omitProperties.add('_readableState');
-            } else if (input instanceof Writable) {
-                omitProperties.add('domain');
-                omitProperties.add('_writableState');
-            } else if (input instanceof Duplex) {
-                omitProperties.add('domain');
-                omitProperties.add('_readableState');
-                omitProperties.add('_writableState');
-            }
-        }
-
-        for (const [key, descriptor] of Object.entries(propertyDescriptors)) {
-            if (typeof key !== 'string') {
-                continue;
-            }
-            if (omitProperties.has(key)) {
-                continue;
-            }
-            const mappedDesc = {
-                writable: descriptor.writable,
-                enumerable: descriptor.enumerable,
-                configurable: descriptor.configurable,
-            } as typeof desc['propertyDescriptors'][string];
-            if (descriptor.hasOwnProperty('value')) {
-                mappedDesc.type = 'property';
-                mappedDesc.value = this.export(descriptor.value);
-            } else if (descriptor.hasOwnProperty('get') && descriptor.hasOwnProperty('set')) {
-                mappedDesc.type = 'getter&setter';
-            } else if (descriptor.hasOwnProperty('get')) {
-                mappedDesc.type = 'getter';
-            } else if (descriptor.hasOwnProperty('set')) {
-                mappedDesc.type = 'setter';
-            }
-            desc.propertyDescriptors[key] = mappedDesc;
-        }
-
-        return desc;
     }
 
     prepareForTransfer(input: any): PseudoTransferProfile[] {
