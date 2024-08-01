@@ -1,5 +1,5 @@
 import { AsyncService } from 'civkit';
-import { Duplex, Readable, Writeable } from 'node:stream';
+import { Duplex, Readable, Writable } from 'node:stream';
 import { parentPort, threadId } from 'node:worker_threads';
 type Constructor<T = any> = abstract new (...args: any) => T;
 
@@ -50,14 +50,15 @@ function isNativelyTransferable(input: object) {
     return false;
 }
 
-export class PseudoTransfer extends AsyncService {
+export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService {
 
     trackedSerialToObject = new Map();
     trackedObjectToSerial = new WeakMap();
 
-    knownTypes = new Map<string, Constructor>;
+    pseudoTransferableTypes = new Map<string, Constructor>;
 
-    receivedObject = new WeakMap<object, string>;
+    receivedObject = new WeakMap<object | Function, string>;
+    receivedObjectOrigin = new WeakMap<object | Function, T>;
 
     serial = 0n;
 
@@ -94,11 +95,11 @@ export class PseudoTransfer extends AsyncService {
         this.trackedSerialToObject.delete(n);
     }
 
-    beware(type: Constructor) {
-        if (this.knownTypes.has(type.name)) {
+    expectPseudoTransferableType(type: Constructor) {
+        if (this.pseudoTransferableTypes.has(type.name)) {
             throw new Error(`Duplicated type name: ${type.name}`);
         }
-        this.knownTypes.set(type.name, type);
+        this.pseudoTransferableTypes.set(type.name, type);
     }
 
 
@@ -142,7 +143,7 @@ export class PseudoTransfer extends AsyncService {
             if (input instanceof Readable) {
                 omitProperties.add('domain');
                 omitProperties.add('_readableState');
-            } else if (input instanceof Writeable) {
+            } else if (input instanceof Writable) {
                 omitProperties.add('domain');
                 omitProperties.add('_writableState');
             } else if (input instanceof Duplex) {
@@ -180,6 +181,49 @@ export class PseudoTransfer extends AsyncService {
         return desc;
     }
 
+    callRemoteFunction(origin: T, fnOid: string, thisArgOid: string, args: any[]) {
+
+    };
+
+    import(input: AnyDescriptor): any {
+        if (input.type === 'primitive') {
+            return input.value;
+        }
+
+        this.trackedObjectToSerial.set(instance, this.idToSerial(oid));
+
+        for (const [key, descriptor] of Object.entries(propertyDescriptors)) {
+            if (descriptor.type === 'property') {
+                Object.defineProperty(instance, key, {
+                    writable: descriptor.writable,
+                    enumerable: descriptor.enumerable,
+                    configurable: descriptor.configurable,
+                    value: this.import(descriptor.value!),
+                });
+            } else if (descriptor.type === 'getter&setter') {
+                Object.defineProperty(instance, key, {
+                    get: () => this.import(descriptor.value!),
+                    set: (v) => this.import(descriptor.value!),
+                    enumerable: descriptor.enumerable,
+                    configurable: descriptor.configurable,
+                });
+            } else if (descriptor.type === 'getter') {
+                Object.defineProperty(instance, key, {
+                    get: () => this.import(descriptor.value!),
+                    enumerable: descriptor.enumerable,
+                    configurable: descriptor.configurable,
+                });
+            } else if (descriptor.type === 'setter') {
+                Object.defineProperty(instance, key, {
+                    set: (v) => this.import(descriptor.value!),
+                    enumerable: descriptor.enumerable,
+                    configurable: descriptor.configurable,
+                });
+            }
+        }
+
+        return instance;
+    }
 
 }
 
