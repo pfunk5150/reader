@@ -5,6 +5,7 @@ import { parentPort, threadId } from 'node:worker_threads';
 type Constructor<T = any> = abstract new (...args: any) => T;
 
 export const SYM_PSEUDO_TRANSFERABLE = Symbol('PseudoTransferable');
+export const SYM_REMOTE_OBJECT = Symbol('RemoteObject');
 
 type SpecialTraits = 'EventEmitter' | 'Promise' | 'AsyncIterator' | 'thisArg';
 export interface PseudoTransferableOptions {
@@ -34,7 +35,7 @@ export function detectSpecialTraits(input: any) {
         return [];
     }
 
-    const traits: Array<'EventEmitter' | 'Promise' | 'AsyncIterator'> = [];
+    const traits: Array<SpecialTraits> = [];
 
     if (typeof input.then === 'function') {
         traits.push('Promise');
@@ -53,7 +54,11 @@ export function detectSpecialTraits(input: any) {
     return [];
 }
 
-export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService {
+export interface MessagePortLike extends EventTarget {
+    postMessage(message: any, transfer?: Transferable[]): void;
+}
+
+export class PseudoTransfer<T extends MessagePortLike = Worker> extends AsyncService {
 
     trackedSerialToObject = new Map();
     trackedObjectToSerial = new WeakMap();
@@ -72,12 +77,21 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
     }
 
     idToSerial(id: string) {
-        return BigInt(id.split('__')[1]);
+        const parsed = id.split('__');
+        return {
+            remote: parseInt(parsed[0]),
+            serial: BigInt(parsed[1]),
+        };
     }
 
     track(obj: object) {
         if (typeof obj !== 'object') {
             throw new Error('Only objects can be tracked.');
+        }
+
+        const remoteSerial = Reflect.get(obj, SYM_REMOTE_OBJECT);
+        if (remoteSerial) {
+            return remoteSerial;
         }
 
         const n = this.trackedObjectToSerial.get(obj);
@@ -113,7 +127,9 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
         const profiles: [any, PseudoTransferProfile][] = [];
 
         const transferSettings: PseudoTransferableOptions | undefined = input[SYM_PSEUDO_TRANSFERABLE]?.();
-        const topTraits: PseudoTransferProfile['traits'] = transferSettings?.imitateSpecialTraits || detectSpecialTraits(input);
+        const detectedTraits = detectSpecialTraits(input);
+        const topTraits: PseudoTransferProfile['traits'] = transferSettings?.imitateSpecialTraits || detectedTraits;
+
         profiles.push([
             input,
             {
@@ -138,7 +154,7 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
         }
 
         return profiles.map(([val, profile]) => {
-            if (profile.traits?.length || profile.oMethods?.length) {
+            if (profile.traits?.length || profile.oMethods?.length || val?.[SYM_REMOTE_OBJECT]) {
                 profile.oid = this.track(val);
             }
 
@@ -146,48 +162,35 @@ export class PseudoTransfer<T extends EventTarget = Worker> extends AsyncService
         });
     }
 
-    callRemoteFunction(origin: T, fnOid: string, thisArgOid: string, args: any[]) {
-
+    callRemoteFunction(origin: T, fnOid: string, args: any[]) {
+        origin.postMessage({
+            type: 'remoteFunctionCall',
+            fnOid,
+            args,
+        });
+    };
+    callRemoteMethod(origin: T, fnOid: string, args: any[]) {
+        origin.postMessage({
+            type: 'remoteFunctionCall',
+            fnOid,
+            args,
+        });
     };
 
-    import(input: AnyDescriptor): any {
-        if (input.type === 'primitive') {
-            return input.value;
-        }
+    mangleTransferred(transferred: any, profiles: PseudoTransferProfile[]): any {
+        const reversed = profiles.reverse();
 
-        this.trackedObjectToSerial.set(instance, this.idToSerial(oid));
-
-        for (const [key, descriptor] of Object.entries(propertyDescriptors)) {
-            if (descriptor.type === 'property') {
-                Object.defineProperty(instance, key, {
-                    writable: descriptor.writable,
-                    enumerable: descriptor.enumerable,
-                    configurable: descriptor.configurable,
-                    value: this.import(descriptor.value!),
-                });
-            } else if (descriptor.type === 'getter&setter') {
-                Object.defineProperty(instance, key, {
-                    get: () => this.import(descriptor.value!),
-                    set: (v) => this.import(descriptor.value!),
-                    enumerable: descriptor.enumerable,
-                    configurable: descriptor.configurable,
-                });
-            } else if (descriptor.type === 'getter') {
-                Object.defineProperty(instance, key, {
-                    get: () => this.import(descriptor.value!),
-                    enumerable: descriptor.enumerable,
-                    configurable: descriptor.configurable,
-                });
-            } else if (descriptor.type === 'setter') {
-                Object.defineProperty(instance, key, {
-                    set: (v) => this.import(descriptor.value!),
-                    enumerable: descriptor.enumerable,
-                    configurable: descriptor.configurable,
-                });
+        for (const profile of reversed) {
+            const val = _.get(transferred, profile.path);
+            if (!val) {
+                continue;
             }
+            if (profile.oid) {
+                Reflect.set(val, SYM_REMOTE_OBJECT, profile.oid);
+            }
+
         }
 
-        return instance;
     }
 
 }
@@ -457,7 +460,7 @@ export function* deepVectorizeForTransfer(
         const valTransferSettings: PseudoTransferableOptions | undefined = val[SYM_PSEUDO_TRANSFERABLE]?.();
         const valTraits = valTransferSettings?.imitateSpecialTraits || detectSpecialTraits(val);
 
-        if (refStack.has(val)) {
+        if (refStack.has(val) || val[SYM_REMOTE_OBJECT]) {
             // Circular
             yield [stack.concat(name), val, getConfigMode(descriptor as PropertyDescriptor), null, undefined];
 
